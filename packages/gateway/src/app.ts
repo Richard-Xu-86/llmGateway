@@ -257,6 +257,10 @@ export function createGateway(config: GatewayConfig) {
     const out = new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {
+          // Logged BEFORE the await: if `pull enter` appears with no matching
+          // `read`, the read is hanging (upstream or the HTTP client). If it
+          // never appears, the stream stopped asking us for data (our consumer).
+          if (trace) console.error(`[stream ${short}] pull enter (read#${readCount + 1} pending)`);
           const { done, value } = await reader.read();
           if (trace) {
             readCount += 1;
