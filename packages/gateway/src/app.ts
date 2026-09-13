@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { type LogRecord, redactHeaders, truncateBody } from '@gw/shared';
-import { type ApiKey, authenticate } from './auth.ts';
+import { type ApiKey, authenticate } from '@gw/shared/keys';
 import { StreamCapture } from './capture.ts';
 import { SseReframer } from './sse.ts';
 import type { LogSink } from './sink.ts';

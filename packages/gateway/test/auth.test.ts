@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { OTHER_KEY, TEST_KEY, postChat, readEvents, startStack, waitForLog } from './helpers.ts';
-import { authenticate, parseKeySpec, sha256 } from '../src/auth.ts';
+import { authenticate, parseKeySpec, sha256 } from '@gw/shared/keys';
 
 describe('key store', () => {
   const SECRET_ONE = 'gw_live_5f3a9c21b7e4d8006aa1';

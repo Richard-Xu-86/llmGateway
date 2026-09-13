@@ -1,7 +1,7 @@
 import { serve } from '@hono/node-server';
 import { app as mockApp } from '../../mock-openai/src/app.ts';
 import { createGateway } from '../src/app.ts';
-import { parseKeySpec } from '../src/auth.ts';
+import { parseKeySpec } from '@gw/shared/keys';
 import { MemorySink, type LogSink } from '../src/sink.ts';
 import { SseReframer, parseEventData } from '../src/sse.ts';
 

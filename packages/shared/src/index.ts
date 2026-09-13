@@ -90,3 +90,52 @@ export function truncateBody(body: string | null): { body: string | null; trunca
   const slice = Buffer.from(body, 'utf8').subarray(0, MAX_STORED_BODY_BYTES).toString('utf8');
   return { body: slice, truncated: true };
 }
+
+/* ---------------------------------------------------------------------------
+ * View types.
+ *
+ * The dashboard imports these with `import type`, so nothing here reaches a
+ * browser bundle. They live in shared for the same reason LogRecord does: the
+ * backend produces them and the dashboard consumes them, and a drift between
+ * those two is a bug nobody notices until a column is silently empty.
+ * ------------------------------------------------------------------------ */
+
+/** The list view never ships bodies or headers — those arrive when a row is opened. */
+export interface LogSummary {
+  id: string;
+  startedAt: number;
+  method: string;
+  path: string;
+  model: string | null;
+  isStream: boolean;
+  status: number;
+  durationMs: number;
+  ttftMs: number | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  terminalState: string;
+  apiKeyName: string;
+}
+
+export interface Filters {
+  methods?: string[];
+  statusClasses?: string[]; // '2xx' | '4xx' | '5xx'
+  terminalStates?: string[];
+  models?: string[];
+  /** substring match on the URL */
+  q?: string;
+}
+
+export interface Page {
+  rows: LogSummary[];
+  nextCursor: string | null;
+}
+
+export interface Stats {
+  total: number;
+  errors: number;
+  p50: number;
+  p95: number;
+  promptTokens: number;
+  completionTokens: number;
+}

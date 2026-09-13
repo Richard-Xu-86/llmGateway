@@ -1,6 +1,6 @@
 import { serve } from '@hono/node-server';
 import { createGateway } from './app.ts';
-import { parseKeySpec } from './auth.ts';
+import { parseKeySpec } from '@gw/shared/keys';
 import { HttpSink, MemorySink, type LogSink } from './sink.ts';
 
 try {
