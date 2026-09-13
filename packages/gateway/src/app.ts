@@ -231,6 +231,19 @@ export function createGateway(config: GatewayConfig) {
     const reader = upstream.body!.getReader();
 
     /**
+     * GATEWAY_DEBUG_STREAM=1 traces the read loop to stderr, one line per read.
+     * A stalled stream is otherwise invisible: nothing throws, nothing logs, and
+     * the caller just sits there. This says which side stopped — no more reads
+     * means upstream went quiet, reads with no events means we are mid-event,
+     * and reads that forward nothing means we are dropping them.
+     */
+    const trace = process.env.GATEWAY_DEBUG_STREAM === '1';
+    const short = id.slice(0, 8);
+    let readCount = 0;
+    let forwarded = 0;
+    if (trace) console.error(`[stream ${short}] open  status=${upstream.status} ct=${contentType}`);
+
+    /**
      * Pull-driven on purpose.
      *
      * `pull` is only called when the caller has room for more, so back-pressure
@@ -245,17 +258,33 @@ export function createGateway(config: GatewayConfig) {
       async pull(controller) {
         try {
           const { done, value } = await reader.read();
+          if (trace) {
+            readCount += 1;
+            console.error(
+              `[stream ${short}] read#${readCount} ${done ? 'DONE' : `${value!.byteLength}B`}`,
+            );
+          }
           if (done) {
             for (const event of reframer.end()) {
               if (capture.observe(event, injectUsage)) controller.enqueue(encoder.encode(event));
             }
             controller.close();
+            if (trace) console.error(`[stream ${short}] closed after ${forwarded} events`);
             finish(); // the caller already has every byte by now
             return;
           }
           // Hot path. Reframe, observe, forward. Nothing else.
-          for (const event of reframer.push(value)) {
-            if (capture.observe(event, injectUsage)) controller.enqueue(encoder.encode(event));
+          const events = reframer.push(value);
+          for (const event of events) {
+            if (capture.observe(event, injectUsage)) {
+              controller.enqueue(encoder.encode(event));
+              forwarded += 1;
+            }
+          }
+          if (trace) {
+            console.error(
+              `[stream ${short}]   ${events.length} events, ${forwarded} forwarded total, desiredSize=${controller.desiredSize}`,
+            );
           }
         } catch (err) {
           if (c.req.raw.signal?.aborted) capture.aborted = true;
