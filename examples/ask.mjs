@@ -29,7 +29,14 @@ const bold = (s) => `\x1b[1m${s}\x1b[0m`;
 const green = (s) => `\x1b[32m${s}\x1b[0m`;
 const red = (s) => `\x1b[31m${s}\x1b[0m`;
 
-const client = new OpenAI({ baseURL: BASE, apiKey: KEY });
+// `fetch: globalThis.fetch` matters.
+//
+// The openai v4 SDK ships node-fetch v2 as its HTTP layer. That package
+// predates modern Node streams and reports ERR_STREAM_PREMATURE_CLOSE when a
+// streamed response ends on Node 22+, after having received every byte
+// correctly. Handing the SDK Node's own fetch (undici) skips the shim entirely.
+// openai v5 drops node-fetch and this line becomes unnecessary.
+const client = new OpenAI({ baseURL: BASE, apiKey: KEY, fetch: globalThis.fetch });
 
 console.log(dim(`\n  caller  → ${BASE}`));
 console.log(dim(`  asking  → ${question}\n`));
