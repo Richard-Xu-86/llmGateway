@@ -17,7 +17,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev:backend": "tsx watch packages/backend/src/server.ts",
     "dev:dashboard": "vite --config packages/dashboard/vite.config.ts packages/dashboard",
-    "build": "vite build --config packages/dashboard/vite.config.ts packages/dashboard"
+    "build": "vite build --config packages/dashboard/vite.config.ts packages/dashboard",
+    "ask": "node --no-deprecation examples/ask.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
@@ -35,6 +36,7 @@
     "@types/react-dom": "^18.3.5",
     "@types/ws": "^8.5.13",
     "@vitejs/plugin-react": "^4.3.4",
+    "openai": "^4.77.0",
     "playwright": "^1.63.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
