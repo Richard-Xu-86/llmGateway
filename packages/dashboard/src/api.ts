@@ -34,10 +34,27 @@ export const clearKey = (): void => {
   }
 };
 
+/**
+ * Carries the status so callers can tell "you are wrong" from "I am broken".
+ * `status` is null when the request never reached the server at all.
+ */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number | null,
+  ) {
+    super(message);
+  }
+}
+
 async function get<T>(key: string, path: string): Promise<T> {
-  const res = await fetch(path, { headers: { authorization: `Bearer ${key}` } });
-  if (res.status === 401) throw new Error('unauthorized');
-  if (!res.ok) throw new Error(`request failed: ${res.status}`);
+  let res: Response;
+  try {
+    res = await fetch(path, { headers: { authorization: `Bearer ${key}` } });
+  } catch {
+    throw new ApiError('backend unreachable', null);
+  }
+  if (!res.ok) throw new ApiError(`request failed: ${res.status}`, res.status);
   return res.json() as Promise<T>;
 }
 

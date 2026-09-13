@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { verifyKey } from '../api';
+import { ApiError, verifyKey } from '../api';
 
 export function Login({ onSignedIn }: { onSignedIn: (key: string, name: string) => void }) {
   const [key, setKey] = useState('');
@@ -13,8 +13,15 @@ export function Login({ onSignedIn }: { onSignedIn: (key: string, name: string) 
     try {
       const me = await verifyKey(key.trim());
       onSignedIn(key.trim(), me.name);
-    } catch {
-      setError('That key was not recognised.');
+    } catch (err) {
+      // "Wrong key" and "backend is down" are different problems and deserve
+      // different sentences - conflating them sends you hunting for the wrong one.
+      const status = err instanceof ApiError ? err.status : null;
+      setError(
+        status === 401
+          ? 'That key was not recognised. The dashboard wants a gateway key (gw_live_...), not your OpenAI key.'
+          : 'Could not reach the backend on :4020. Is `npm run dev` still running?',
+      );
     } finally {
       setBusy(false);
     }
