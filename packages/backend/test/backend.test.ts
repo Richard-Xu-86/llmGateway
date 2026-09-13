@@ -113,9 +113,19 @@ describe('tenancy', () => {
     expect((await asKey('gw_live_nope', '/api/logs')).status).toBe(401);
   });
 
-  it('counts stats per key', async () => {
+  it('counts stats per key, with the previous window for comparison', async () => {
     const stats = await (await asKey(KEY_A, '/api/stats')).json();
-    expect(stats.total).toBe(1);
+    expect(stats.current.total).toBe(1);
+    expect(stats.previous.total).toBe(0);
+  });
+
+  it('does not let the previous window leak into the current one', async () => {
+    // 90 minutes sits comfortably inside the previous window [now-2h, now-1h);
+    // exactly 2h would land on the boundary and flake.
+    await ingest([record({ startedAt: Date.now() - 90 * 60 * 1000 })]);
+    const stats = await (await asKey(KEY_A, '/api/stats')).json();
+    expect(stats.current.total).toBe(1); // the old row is outside the window
+    expect(stats.previous.total).toBe(1);
   });
 });
 

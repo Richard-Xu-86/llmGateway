@@ -76,9 +76,17 @@ export function createBackend({ store, hub, keys, ingestSecret }: BackendConfig)
     return record ? c.json(record) : c.json({ error: 'not found' }, 404);
   });
 
+  /**
+   * Current window and the one before it, so the dashboard can show a delta.
+   * "p95 is 2.2s" is a number; "p95 is 2.2s, down 340ms" is information.
+   */
   app.get('/api/stats', (c) => {
     const windowMs = Number(c.req.query('windowMs')) || 60 * 60 * 1000;
-    return c.json(store.stats(keyOf(c).id, Date.now() - windowMs));
+    const now = Date.now();
+    return c.json({
+      current: store.stats(keyOf(c).id, now - windowMs),
+      previous: store.stats(keyOf(c).id, now - windowMs * 2, now - windowMs),
+    });
   });
 
   app.get('/api/models', (c) => c.json({ models: store.models(keyOf(c).id) }));

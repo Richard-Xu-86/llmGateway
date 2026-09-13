@@ -154,25 +154,25 @@ export class LogStore {
     return row ? toRecord(row) : null;
   }
 
-  stats(apiKeyId: string, sinceMs: number): Stats {
+  stats(apiKeyId: string, sinceMs: number, untilMs = Number.MAX_SAFE_INTEGER): Stats {
     const agg = this.#db
       .prepare(
         `SELECT COUNT(*) AS total,
                 SUM(CASE WHEN terminal_state != 'completed' THEN 1 ELSE 0 END) AS errors,
                 COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
                 COALESCE(SUM(completion_tokens), 0) AS completion_tokens
-         FROM request_logs WHERE api_key_id = ? AND started_at >= ?`,
+         FROM request_logs WHERE api_key_id = ? AND started_at >= ? AND started_at < ?`,
       )
-      .get(apiKeyId, sinceMs) as any;
+      .get(apiKeyId, sinceMs, untilMs) as any;
 
     const durations = (
       this.#db
         .prepare(
           `SELECT duration_ms FROM request_logs
-           WHERE api_key_id = ? AND started_at >= ?
+           WHERE api_key_id = ? AND started_at >= ? AND started_at < ?
            ORDER BY duration_ms ASC LIMIT 5000`,
         )
-        .all(apiKeyId, sinceMs) as any[]
+        .all(apiKeyId, sinceMs, untilMs) as any[]
     ).map((r) => r.duration_ms as number);
 
     const at = (p: number) =>
