@@ -1,0 +1,16 @@
+{
+  "name": "@gw/dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@gw/shared": "*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}
