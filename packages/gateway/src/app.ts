@@ -279,9 +279,15 @@ export function createGateway(config: GatewayConfig) {
 
     responseHeaders.set('content-type', 'text/event-stream; charset=utf-8');
     responseHeaders.set('cache-control', 'no-cache');
-    responseHeaders.set('connection', 'keep-alive');
     // Tells nginx and friends not to undo everything above.
     responseHeaders.set('x-accel-buffering', 'no');
+    //
+    // Deliberately NOT setting `connection: keep-alive`. It is a hop-by-hop
+    // header describing one TCP link, so a proxy must never set or forward it
+    // (RFC 9110 7.6.1) - and setting it by hand makes Node stop managing the
+    // response framing itself, so the chunked terminator can go unwritten. curl
+    // tolerates a body that simply stops; a strict SSE parser reports
+    // "Premature close". Let the runtime own its own framing.
 
     return new Response(out, { status: upstream.status, headers: responseHeaders });
   });

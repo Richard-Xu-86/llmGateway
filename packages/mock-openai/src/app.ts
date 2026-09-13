@@ -180,7 +180,8 @@ app.post('/v1/chat/completions', async (c) => {
     headers: {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-cache',
-      connection: 'keep-alive',
+      // No `connection` header here either — same hop-by-hop reason as the
+      // gateway. The mock should behave like a well-mannered upstream.
     },
   });
 });
