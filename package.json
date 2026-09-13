@@ -14,17 +14,29 @@
     "dev:gateway": "tsx watch packages/gateway/src/server.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev:backend": "tsx watch packages/backend/src/server.ts",
+    "dev:dashboard": "vite --config packages/dashboard/vite.config.ts packages/dashboard",
+    "build": "vite build --config packages/dashboard/vite.config.ts packages/dashboard"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
     "hono": "^4.6.14",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.18.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
+    "playwright": "^1.63.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
+    "vite": "^5.4.11",
     "vitest": "^2.1.8"
   }
 }

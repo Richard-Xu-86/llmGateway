@@ -1,32 +1,39 @@
 # LLM Gateway
 
-An authenticating proxy that sits in front of the OpenAI API, records every
-request and response, and streams the answer back untouched — plus a dashboard
-for inspecting the traffic.
+An authenticating proxy in front of the OpenAI API that records every request
+and response, streams the answer back untouched, and a dashboard for inspecting
+the traffic live.
+
+![The live request table](docs/dashboard.png)
 
 ```
 ┌────────────┐  Authorization: Bearer gw_…  ┌──────────────┐  real OpenAI key  ┌────────────┐
 │ client app │ ───────────────────────────► │   GATEWAY    │ ────────────────► │  OpenAI    │
-│ (openai    │ ◄───────── SSE ───────────── │   (proxy)    │ ◄───── SSE ────── │  (or mock) │
+│ (openai    │ ◄───────── SSE ───────────── │   :4000      │ ◄───── SSE ────── │  (or mock) │
 │  SDK)      │                              └──────┬───────┘                   └────────────┘
 └────────────┘                                     │ async batch POST /ingest
                                                    ▼
                                             ┌──────────────┐   WebSocket push   ┌────────────┐
                                             │ LOG BACKEND  │ ─────────────────► │ DASHBOARD  │
-                                            │  + SQLite    │ ◄── REST queries ─ │  (React)   │
+                                            │ :4020 SQLite │ ◄── REST queries ─ │   :5173    │
                                             └──────────────┘                    └────────────┘
 ```
 
 ## Quick start
 
-No OpenAI key required, and no Docker, database or global tooling.
+No OpenAI key, no Docker, no database, no global tooling. Node 22+ is the only
+prerequisite — `node:sqlite` is built into the runtime, so nothing compiles at
+install time.
 
 ```bash
 npm install
-npm run dev      # starts the mock upstream + the gateway
+npm run dev
 ```
 
-In another terminal:
+That starts all four services. Open **http://localhost:5173** and sign in with
+`gw_live_demo_key_1`.
+
+Then send traffic through the gateway:
 
 ```bash
 curl -N http://localhost:4000/v1/chat/completions \
@@ -35,17 +42,31 @@ curl -N http://localhost:4000/v1/chat/completions \
   -d '{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
-Tokens arrive one at a time. `-N` matters: without it curl buffers and you will
-blame the wrong component.
+Tokens arrive one at a time, and the row appears in the dashboard as it happens.
+`-N` matters: without it curl buffers and you will blame the wrong component.
 
-To talk to the real API instead, copy `.env.example` to `.env` and set
-`UPSTREAM_BASE_URL=https://api.openai.com` plus your `OPENAI_API_KEY`. Any
-OpenAI SDK works unchanged — point `baseURL` at `http://localhost:4000/v1`.
+Any OpenAI SDK works unchanged — point `baseURL` at `http://localhost:4000/v1`
+and use a gateway key. To reach the real API, copy `.env.example` to `.env` and
+set `UPSTREAM_BASE_URL=https://api.openai.com` with your `OPENAI_API_KEY`.
 
 ```bash
-npm test         # 29 tests, ~6s, no network
+npm test         # 43 tests, ~6s, no network, no API key
 npm run typecheck
 ```
+
+## Requirements
+
+| From the brief | Where | Proven by |
+|---|---|---|
+| Capture method, URL, headers, body | `gateway/src/app.ts` | `logging.test.ts` |
+| Response status, headers, body, latency | `gateway/src/capture.ts` | `logging.test.ts` |
+| Logs shipped asynchronously to the backend | `gateway/src/sink.ts` → `backend/src/app.ts` | `sink-isolation.test.ts` |
+| Streaming via Server-Sent Events | `gateway/src/sse.ts`, `app.ts` | `streaming-timing.test.ts`, `sse.test.ts` |
+| Authenticate to the gateway via API key | `shared/src/keys.ts` | `auth.test.ts` |
+| Logs and metadata stored per API key | `backend/src/db.ts` | `backend.test.ts` (tenancy) |
+| Real-time stream of requests | `backend/src/ws.ts`, `dashboard/src/useLogFeed.ts` | screenshot below |
+| Click through to full detail | `dashboard/src/components/DetailDrawer.tsx` | screenshot below |
+| Filter by method, status, URL substring | `dashboard/src/components/FilterBar.tsx` | `backend.test.ts` (filters) |
 
 ## The problem worth describing
 
@@ -95,14 +116,15 @@ both are asserted, because both are the actual claim being made.
 body exists, so a stream that dies at token 400 looks successful. The gateway
 derives its own verdict — `completed` / `client_aborted` / `upstream_error` /
 `truncated` — from whether `[DONE]` arrived, whether an error object appeared
-in-band, and whether the caller left. This is the field that makes the dashboard
-answer a question OpenAI's own status codes cannot.
+in-band, and whether the caller left. In the screenshot above, the top row is a
+`200` marked `upstream error`; filtering on that state answers a question
+OpenAI's own status codes cannot.
 
 **Streams carry no token usage.** Not unless the request sets
 `stream_options.include_usage`. Rather than log zeros on exactly the calls people
 most want to measure, the gateway adds the flag, reads the usage chunk, and
-removes that chunk again if the caller did not ask for it. Usage is exact and the
-caller's stream is unchanged. This is the one place the proxy is not
+removes that chunk again if the caller did not ask for it — so usage is exact and
+the caller's stream is unchanged. This is the one place the proxy is not
 byte-transparent, it is disclosed here rather than buried, and
 `injectUsage: false` turns it off.
 
@@ -116,22 +138,57 @@ text so forwarding re-encodes to the exact bytes that arrived.
 passed to the upstream `fetch`, and `cancel` cancels the upstream body. The test
 asserts the mock stopped generating, not merely that the gateway returned.
 
+## The dashboard
+
+![Request detail](docs/detail.png)
+
+The gateway key *is* the login: whoever holds it owns the traffic made with it,
+which is exactly the boundary the backend enforces.
+
+Three details are deliberate rather than incidental:
+
+- **Rows are buffered and flushed every 200ms.** Busy traffic arrives faster than
+  React should re-render; one update per tick keeps the table readable.
+- **Pause stops rows being prepended, not the socket.** An auto-scrolling table is
+  unusable the moment you try to click a row in it, and the backlog is still
+  there when you resume.
+- **Filters are pushed to the server**, which applies the same predicate its SQL
+  uses. A filtered view stays live without shipping rows the browser would
+  discard — and without rows appearing that would vanish on refresh. That shared
+  predicate has its own test.
+
+Filters live in the query string, so a filtered view is a shareable link.
+
+## Tenancy
+
+`api_key_id` is the isolation boundary, and it is enforced in one place rather
+than sprinkled through the handlers. Note what is *missing* from the API: no
+endpoint accepts an `api_key_id` parameter. The only way to say which logs you
+want is to prove which key you hold, so there is no version of these handlers
+that can be talked into crossing tenants. Fetching another key's record by id
+returns `404`, not `403` — you cannot even learn it exists.
+
+The WebSocket carries the key as a **subprotocol**, not a query parameter.
+Browsers cannot set headers on a WS handshake, so `?key=…` is the usual
+shortcut — and then the key is in access logs, proxy logs and browser history.
+
 ## Tradeoffs
 
 | Decision | Why | What it costs |
 |---|---|---|
 | SQLite via built-in `node:sqlite` | `npm install && npm run dev`, no server, no container, no native build step | single writer, single node; real log volume wants ClickHouse or Timescale, with Postgres as a stop on the way |
 | Gateway and backend as separate processes | the proxy must not be slowed or taken down by the logging path | more moving parts than one process |
-| Bounded in-memory queue for log shipping | no broker to install; back-pressure is explicit and drops are counted, not silent | at-most-once delivery — an ungraceful crash loses what is queued. A WAL or a broker fixes it |
+| Bounded in-memory queue for log shipping | no broker to install; back-pressure is explicit and drops are counted, not silent | at-most-once on crash — the queue is lost. Retries make delivery at-least-once, which `INSERT OR REPLACE` on the caller-supplied id turns back into effectively-once |
 | Pull-driven readable over `tee()` | one consumer, real back-pressure, an explicit cancel hook | the observer runs on the hot path, so it must stay trivial |
 | Inject `include_usage`, strip the chunk | exact token counts without changing what the caller sees | the proxy is no longer purely transparent |
 | Full bodies stored, truncated at 256 KB | inspecting them is the entire point of the tool | prompts are user data; production needs retention limits, field-level redaction and encryption at rest |
-| SHA-256 for keys, not bcrypt | these are 128+ bits of random checked on every request; a slow KDF adds latency and buys nothing against an unguessable secret | wrong choice entirely for human-chosen passwords |
+| SHA-256 for keys, not bcrypt | 128+ bits of random, checked on every request; a slow KDF adds latency and buys nothing against an unguessable secret | wrong choice entirely for human-chosen passwords |
 | Header allowlists in both directions | a header nobody thought about leaks nothing | an unusual header needs an explicit addition |
+| Plain CSS, no component library | a devtool is tables and chips; one stylesheet is less machinery than a design system | no theming story beyond CSS variables |
 
 ## Verification
 
-The interesting tests are the ones that check the claim rather than the code.
+The interesting tests check the claim rather than the code.
 
 Every mock chunk carries the timestamp it was emitted at, so `arrived - emitted`
 is the gateway's transit cost for that chunk. Two shapes are possible: streaming
@@ -141,16 +198,19 @@ last. A flat line is the proof, and nothing else produces one.
 
 | Test | What it proves |
 |---|---|
-| `streaming-timing` — flat overhead | per-chunk overhead spread < 100ms where buffering would be ~440ms |
-| `streaming-timing` — slow tail | first chunk delivered in < 300ms of a stream that takes over a second |
-| `sink-isolation` — blocking sink | a sink blocking 300ms does not move caller timings; sink called exactly once |
+| `streaming-timing` — flat overhead | per-chunk spread < 100ms where buffering would be ~440ms |
+| `streaming-timing` — slow tail | first chunk delivered in < 300ms of a stream taking over a second |
+| `sink-isolation` — blocking sink | a sink blocking 300ms does not move caller timings; called exactly once |
 | `sink-isolation` — throwing sink | a logging failure never becomes a caller-facing failure |
 | `sse` — split multi-byte char | an emoji cut across two reads is not corrupted in the log |
 | `logging` — in-band error | `terminal_state = upstream_error` on a `200 OK` stream |
 | `logging` — client disconnect | the upstream stopped generating, not just the gateway |
 | `logging` — usage | exact tokens captured, caller's stream unchanged |
 | `logging` — redaction | neither the caller's key nor the upstream key appears in a stored record |
-| `auth` — attribution | each record carries the key that made it |
+| `backend` — tenancy | key A cannot list or fetch key B's logs; unknown key is 401 |
+| `backend` — idempotent ingest | a retried batch does not duplicate rows |
+| `backend` — filters, pagination | each filter and the keyset cursor behave |
+| `backend` — live predicate | the WS filter agrees with the SQL filter |
 
 Back-pressure is deliberately not asserted end-to-end; the comment in
 `logging.test.ts` explains why a test written against the mock would measure the
@@ -160,29 +220,23 @@ mock's HTTP adapter rather than the gateway, and what is asserted instead.
 
 ```
 packages/
-  shared/        LogRecord zod schema — the contract all three services share
+  shared/        LogRecord + view types (the contract) and key hashing
   mock-openai/   metronome upstream: timestamped SSE, controllable failures
   gateway/       the proxy
     src/sse.ts       reframes bytes into whole SSE events
     src/capture.ts   accumulates the log record as events fly past
     src/sink.ts      LogSink interface + memory and HTTP implementations
-    src/auth.ts      key hashing and lookup
     src/app.ts       the proxy itself
+  backend/       ingest, SQLite store, query API, WebSocket fan-out
+  dashboard/     React + Vite: login, live table, filters, detail drawer
 ```
-
-## Status
-
-Built and tested: the proxy, streaming, auth, capture, and the log sink
-interface with both implementations.
-
-Next: the backend (`/ingest`, SQLite, query API, WebSocket fan-out) and the
-React dashboard (login, live table, detail drawer, filters).
 
 ## Further work
 
 Per-key rate limits and budgets; provider fan-out behind one OpenAI-shaped API;
 response caching; session/trace grouping so a whole agent run reads as one tree
-instead of forty loose rows; PII scrubbing before storage; OpenTelemetry export.
+instead of forty loose rows; PII scrubbing before storage; OpenTelemetry export;
+a retention policy, because storing full prompts forever is a liability.
 
 ## AI assistance
 
