@@ -116,13 +116,11 @@ const out = new ReadableStream({
 });
 ```
 
-**Pull-driven, not a `TransformStream`.** `tee()` was the first instinct and it
-is worse here: two consumers of one source means the stream runs at the speed of
-the slower branch, and an unconsumed branch deadlocks it outright. A pull-driven
-readable has one consumer, so back-pressure runs from the caller's socket to the
-upstream connection — and `cancel` gives an explicit hook that `TransformStream`
-does not, which is how a caller hanging up becomes `client_aborted` rather than
-an anonymous stream error.
+**One consumer, pull-driven.** `pull` is called only when the caller has room for
+more, so back-pressure runs the whole way from the caller's socket to the
+upstream connection — a slow reader slows the source instead of filling a buffer
+here. `cancel` is the hook that makes a caller hanging up land as
+`client_aborted` rather than an anonymous stream error.
 
 **`observe` is on the hot path, so it does almost nothing.** Reframe, parse,
 append, stamp a timestamp. Record assembly happens after the last byte is on the
@@ -175,7 +173,7 @@ upstream that is allowed to be inconvenient.*
 | SQLite via built-in `node:sqlite` | `npm install && npm run dev`, no server, no container, no native build | single writer, single node; real volume wants ClickHouse or Timescale |
 | Gateway and backend as separate processes | the proxy must not be slowed or taken down by the logging path | more moving parts than one process |
 | Bounded in-memory queue for log shipping | no broker to install; back-pressure explicit, drops counted rather than silent | at-most-once on crash. Retries make delivery at-least-once, which `INSERT OR REPLACE` on the caller-supplied id turns back into effectively-once |
-| Pull-driven readable over `tee()` | one consumer, real back-pressure, an explicit cancel hook | the observer runs on the hot path, so it must stay trivial |
+| One pull-driven readable, observed in passing | real back-pressure end to end, and an explicit cancel hook | the observer runs on the hot path, so it must stay trivial |
 | Inject `include_usage`, strip the chunk | exact token counts without changing what the caller sees | the proxy is no longer purely transparent |
 | Full bodies stored, truncated at 256 KB | inspecting them is the entire point of the tool | prompts are user data; production needs retention limits, field-level redaction, encryption at rest |
 | SHA-256 for keys, not bcrypt | 128+ bits of random checked on every request; a slow KDF adds latency and buys nothing against an unguessable secret | wrong choice entirely for human-chosen passwords |
@@ -328,37 +326,3 @@ packages/
 examples/
   ask.mjs        a real client: streams an answer, then checks it against the log
 ```
-
-## Scaling
-
-The proxy tier scales by buying machines — it is stateless already. The logging
-plane does not, in its current shape: one stored record per request is 4 GB/s and
-345 TB/day at a million requests per second, and no choice of database fixes
-that. The answer is to split metrics (aggregated, every request, forever) from
-traces (sampled, full fidelity, short retention), worth roughly 100x before any
-infrastructure changes.
-
-Two findings from working that through are already fixed here, because they were
-cheap and real. **The first ceiling was 200 records/sec** — one batch of 50 every
-250ms, one request in flight; the sink now runs several batches concurrently,
-since the limit is round-trip latency rather than bytes, and a test asserts the
-concurrency rather than trusting the constant. **Batch inserts now run in one
-transaction**, where each row was previously its own implicit transaction and its
-own WAL commit.
-
-## Further work
-
-Per-key rate limits and budgets; provider fan-out behind one OpenAI-shaped API;
-response caching; session/trace grouping so a whole agent run reads as one tree
-instead of forty loose rows; PII scrubbing before storage; OpenTelemetry export;
-a retention policy, because storing full prompts forever is a liability.
-
-Rejected keys are not logged: the auth check returns before the log emitter is
-constructed, so a `401` leaves no row. "Someone is trying keys against my
-gateway" is precisely what an inspector should surface, and it is a small fix —
-move the check below `emit` and write a row with a null `apiKeyId`.
-
-## AI assistance
-
-_(Describe here how Copilot / Claude / ChatGPT were used — the brief asks, and a
-straight answer reads better than a vague one.)_
