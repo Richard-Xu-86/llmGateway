@@ -94,78 +94,6 @@ cURL" reproduces — and `upstreamUrl` is where it was forwarded. Every upstream
 shares the same paths, so without the second there is nothing to say whether a
 call reached OpenAI or the local mock.
 
-## The hard part
-
-Everything here is ordinary CRUD except one thing: a streamed response is not a
-body, it is a connection held open for tens of seconds dribbling tokens. Buffer
-it in order to log it and the caller's UI stops streaming — the feature the
-gateway exists to support is the feature it destroys. Forward it untouched and
-there is nothing to log.
-
-The resolution is to observe events as they pass rather than collect them:
-
-```ts
-const out = new ReadableStream({
-  async pull(controller) {
-    const { done, value } = await reader.read();
-    for (const event of reframer.push(value)) {
-      if (capture.observe(event)) controller.enqueue(encode(event));
-    }
-  },
-  cancel() { capture.aborted = true; reader.cancel(); finish(); },
-});
-```
-
-**One consumer, pull-driven.** `pull` is called only when the caller has room for
-more, so back-pressure runs the whole way from the caller's socket to the
-upstream connection — a slow reader slows the source instead of filling a buffer
-here. `cancel` is the hook that makes a caller hanging up land as
-`client_aborted` rather than an anonymous stream error.
-
-**`observe` is on the hot path, so it does almost nothing.** Reframe, parse,
-append, stamp a timestamp. Record assembly happens after the last byte is on the
-wire, and `LogSink.write` is synchronous and must never throw. A sink that blocks
-for 300ms does not move the caller's per-chunk timings; a sink that throws does
-not break the response. Both are asserted, because both are the actual claim.
-
-Four things about SSE that are easy to get wrong:
-
-- **A streamed failure is still `200 OK`.** The status is committed before the
-  body exists, so a stream that dies at token 400 looks successful. The gateway
-  derives its own verdict — `completed` / `client_aborted` / `upstream_error` /
-  `truncated` — from whether `[DONE]` arrived, whether an error appeared in-band,
-  and whether the caller left. Filtering on that answers a question status codes
-  cannot.
-- **Streams carry no token usage** unless the request sets
-  `stream_options.include_usage`. Rather than log zeros on exactly the calls
-  people most want to measure, the gateway adds the flag, reads the usage chunk,
-  and strips that chunk again if the caller did not ask for it. The one place the
-  proxy is not byte-transparent — disclosed here rather than buried, and
-  `injectUsage: false` turns it off.
-- **TCP does not respect message boundaries.** One read can hold half an event,
-  three events, or a cut through a 4-byte emoji. `SseReframer` is the only
-  component that has to know this.
-- **A client that hangs up is still being billed.** The caller's `AbortSignal`
-  goes to the upstream `fetch`. The test asserts the mock *stopped generating*,
-  not merely that the gateway returned.
-
-And one that cost a day. **A `pull` that enqueues nothing ends the stream.** A
-`ReadableStream` schedules `pull` again when a chunk is enqueued, when a read
-arrives, or when the stream closes — otherwise not at all. So a `pull` that reads
-bytes, finds it is holding half an SSE frame, and resolves without enqueuing
-*ends the pull chain permanently*: still `readable`, `desiredSize` still
-positive, nothing failed, no further call ever comes.
-
-Every test passed, and the first call to the real API hung after one token. It
-was invisible against the mock, which wrote one whole frame per chunk. Against
-`api.openai.com` a frame splits within the first few reads — a failure mode
-*probabilistic in response length*, so a short smoke test passes and real traffic
-hangs. `pull` now loops until it has something to hand over, the mock grew an
-`x-mock-split-at` header so it can be as rude as a real socket, and
-`streaming-frames.test.ts` hangs without the fix — verified by putting the bug
-back. The lesson the whole test suite is built on: *a proxy is only tested by an
-upstream that is allowed to be inconvenient.*
-
 ## Tradeoffs
 
 | Decision | Why | What it costs |
@@ -173,7 +101,7 @@ upstream that is allowed to be inconvenient.*
 | SQLite via built-in `node:sqlite` | `npm install && npm run dev`, no server, no container, no native build | single writer, single node; real volume wants ClickHouse or Timescale |
 | Gateway and backend as separate processes | the proxy must not be slowed or taken down by the logging path | more moving parts than one process |
 | Bounded in-memory queue for log shipping | no broker to install; back-pressure explicit, drops counted rather than silent | at-most-once on crash. Retries make delivery at-least-once, which `INSERT OR REPLACE` on the caller-supplied id turns back into effectively-once |
-| One pull-driven readable, observed in passing | real back-pressure end to end, and an explicit cancel hook | the observer runs on the hot path, so it must stay trivial |
+| Log the stream by watching it, never buffering it | each token reaches the caller the moment it arrives; back-pressure and cancellation both work end to end | the log record is assembled inside the response path, so that work must stay trivial — anything expensive waits until the last byte is sent |
 | Inject `include_usage`, strip the chunk | exact token counts without changing what the caller sees | the proxy is no longer purely transparent |
 | Full bodies stored, truncated at 256 KB | inspecting them is the entire point of the tool | prompts are user data; production needs retention limits, field-level redaction, encryption at rest |
 | SHA-256 for keys, not bcrypt | 128+ bits of random checked on every request; a slow KDF adds latency and buys nothing against an unguessable secret | wrong choice entirely for human-chosen passwords |
@@ -220,7 +148,10 @@ which is exactly the boundary the backend enforces.
 
 ## Verification
 
-The interesting tests check the claim rather than the code.
+The interesting tests check the claim rather than the code. Two claims carry the
+project: that a streamed answer reaches the caller as it arrives rather than
+being held back so it can be logged, and that logging can never slow a request
+or fail one.
 
 Every mock chunk carries the timestamp it was emitted at, so `arrived - emitted`
 is the gateway's transit cost for that chunk. Two shapes are possible: streaming
@@ -235,7 +166,7 @@ last. A flat line is the proof, and nothing else produces one.
 | `sink-isolation` — throwing sink | a logging failure never becomes a caller-facing failure |
 | `streaming-frames` — split frames | a frame split across reads still reaches the caller; hangs without the fix |
 | `sse` — split multi-byte char | an emoji cut across two reads is not corrupted in the log |
-| `logging` — in-band error | `terminal_state = upstream_error` on a `200 OK` stream |
+| `logging` — in-band error | a stream that fails *after* its `200 OK` is recorded as `upstream_error`, not a success |
 | `logging` — client disconnect | the upstream stopped generating, not just the gateway |
 | `logging` — redaction | neither the caller's key nor the upstream key appears in a stored record |
 | `sink-http` — overflow | the oldest records are dropped, and the count reaches the dashboard |
