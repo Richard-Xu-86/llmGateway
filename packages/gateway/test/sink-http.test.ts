@@ -108,7 +108,7 @@ describe('the log sink under back-pressure', () => {
     // Drain rate is batchSize × concurrency / intervalMs. With one batch at a
     // time it was 50 per 250ms — 200 records/sec, and the first ceiling this
     // system hits by a wide margin. Concurrency matters more than batch size
-    // here: the bottleneck is latency, not bytes. See docs/scaling.md.
+    // here: the bottleneck is latency, not bytes.
     let peak = 0;
     let open = 0;
     const slow = new Hono();

@@ -50,7 +50,7 @@ export interface HttpSinkOptions {
  * the first ceiling this system hits — well before SQLite or the proxy itself.
  * With one batch of 50 every 250ms it was 200 records/sec. Allowing several
  * batches in flight matters more than the batch size, because the limit is
- * round-trip latency rather than bytes. See docs/scaling.md.
+ * round-trip latency rather than bytes.
  */
 export class HttpSink implements LogSink {
   #queue: LogRecord[] = [];
