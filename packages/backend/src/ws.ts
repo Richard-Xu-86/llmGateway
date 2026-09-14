@@ -1,6 +1,6 @@
 import type { Server } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
-import type { LogRecord } from '@gw/shared';
+import { ClientMessage, type LogRecord } from '@gw/shared';
 import { findKey, type ApiKey } from '@gw/shared/keys';
 import { matchesFilters, summarise, type Filters } from './db.ts';
 
@@ -27,13 +27,32 @@ export class Hub {
     client.socket.on('error', () => this.#clients.delete(client));
   }
 
+  /**
+   * One bad client must not cost the others their logs.
+   *
+   * This runs inside the ingest handler, so anything thrown here becomes a 500,
+   * and the gateway's sink responds to a 500 by retrying the same batch — for
+   * ever. That turns one broken subscriber into stalled ingestion for every
+   * tenant. Filters are validated on arrival now, but the isolation belongs
+   * here regardless: fan-out should degrade one connection at a time.
+   */
   broadcast(record: LogRecord): void {
     const summary = summarise(record);
     const payload = JSON.stringify({ type: 'log', row: summary });
     for (const client of this.#clients) {
       if (client.apiKeyId !== record.apiKeyId) continue; // the tenancy boundary
-      if (!matchesFilters(summary, client.filters, record.url)) continue;
-      if (client.socket.readyState === client.socket.OPEN) client.socket.send(payload);
+      try {
+        if (!matchesFilters(summary, client.filters, record.url)) continue;
+        if (client.socket.readyState === client.socket.OPEN) client.socket.send(payload);
+      } catch {
+        // Drop this subscriber's update and carry on with the rest.
+        this.#clients.delete(client);
+        try {
+          client.socket.close(1011, 'subscriber error');
+        } catch {
+          /* already gone */
+        }
+      }
     }
   }
 
@@ -73,12 +92,17 @@ export function attachWebSocket(server: Server, keys: ApiKey[], hub: Hub): WebSo
     socket.send(JSON.stringify({ type: 'ready', apiKeyName: key.name }));
 
     socket.on('message', (raw) => {
+      // Parsed, not trusted. What arrives here is attacker-controlled by
+      // definition — holding a valid key does not make a frame well-formed, and
+      // this value is later used by `matchesFilters` on the ingest path.
+      let parsed: unknown;
       try {
-        const msg = JSON.parse(raw.toString());
-        if (msg?.type === 'filters') client.filters = msg.filters ?? {};
+        parsed = JSON.parse(raw.toString());
       } catch {
-        // A malformed frame from a client is not the server's problem.
+        return; // a malformed frame from a client is not the server's problem
       }
+      const msg = ClientMessage.safeParse(parsed);
+      if (msg.success) client.filters = msg.data.filters ?? {};
     });
   });
 

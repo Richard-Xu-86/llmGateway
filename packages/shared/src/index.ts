@@ -83,6 +83,36 @@ export const IngestBatch = z.object({
 export type IngestBatch = z.infer<typeof IngestBatch>;
 
 /**
+ * What a dashboard may say over its WebSocket.
+ *
+ * The only message a client sends is "these are my filters now", and until this
+ * existed the server stored whatever arrived. That was a real hole: the filter
+ * predicate calls `.includes()` on the arrays, so a value merely *shaped* like
+ * an array — `{ "length": 1 }` — threw on the next broadcast. The throw escaped
+ * `Hub.broadcast`, escaped the ingest handler, and the gateway's sink then
+ * retried that batch forever. One malformed frame from one authenticated client
+ * stopped log ingestion for *every* tenant.
+ *
+ * So: parse, don't trust. Unknown keys are stripped rather than rejected, and a
+ * message that fails outright is ignored — a client sending nonsense should
+ * lose its own filters, not the server.
+ */
+export const ClientMessage = z.object({
+  type: z.literal('filters'),
+  filters: z
+    .object({
+      methods: z.array(z.string()).max(20).optional(),
+      statusClasses: z.array(z.string()).max(20).optional(),
+      terminalStates: z.array(z.string()).max(20).optional(),
+      models: z.array(z.string()).max(50).optional(),
+      q: z.string().max(500).optional(),
+      windowMs: z.number().positive().finite().optional(),
+    })
+    .optional(),
+});
+export type ClientMessage = z.infer<typeof ClientMessage>;
+
+/**
  * The time windows the dashboard offers, shared so the UI and the API cannot
  * drift. Order is the order the chips render in.
  */
