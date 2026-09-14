@@ -1,0 +1,591 @@
+<title>LLM Gateway Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+
+<style>
+/* ── Tokens ────────────────────────────────────────────────────────────────
+   The dark set is lifted verbatim from packages/dashboard/src/styles.css so
+   this page and the product it documents are the same object. The light set
+   is derived: same hue relationships, contrast re-solved for a warm paper
+   ground (orange is a light colour — it has to darken to survive on white).
+   ───────────────────────────────────────────────────────────────────────── */
+:root {
+  --bg: #fbf8f5;
+  --app: #f4efe9;
+  --card: #ffffff;
+  --card2: #f7f2ed;
+  --line: #e7ded5;
+  --line2: #d3c6b9;
+  --line-strong: #a89689;
+
+  --ink: #1b1512;
+  --ink2: #3a302a;
+  --muted: #6f6157;
+  --dim: #8b7d72;
+
+  --accent: #c2510a;
+  --accent-bg: #fdf0e6;
+  --accent-line: #f0c9a6;
+  --on-accent: #fffaf6;
+
+  --ok: #0f7d5c;      --ok-bg: #e6f5ef;   --ok-line: #a8dcc7;
+  --warn: #8f6206;    --warn-bg: #fdf4e0; --warn-line: #ecd39a;
+  --bad: #b3243d;     --bad-bg: #fdecef;  --bad-line: #f2bfc8;
+  --gone: #6f6157;    --gone-bg: #f2ece6; --gone-line: #ddd1c6;
+
+  --shadow: 0 1px 2px rgba(60, 40, 25, .06), 0 8px 24px -12px rgba(60, 40, 25, .14);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0c0a09;
+    --app: #13100e;
+    --card: #191512;
+    --card2: #221c18;
+    --line: #2a2320;
+    --line2: #38302b;
+    --line-strong: #5c5049;
+
+    --ink: #f5f1ed;
+    --ink2: #d6cec7;
+    --muted: #a49a92;
+    --dim: #7d736c;
+
+    --accent: #ff7a18;
+    --accent-bg: #2b1608;
+    --accent-line: #6b3411;
+    --on-accent: #1a0c03;
+
+    --ok: #34d399;   --ok-bg: #0d2b20;   --ok-line: #1c4d38;
+    --warn: #fbbf24; --warn-bg: #2e2207; --warn-line: #5e4713;
+    --bad: #ff5470;  --bad-bg: #2e0f18;  --bad-line: #5e2031;
+    --gone: #a49a92; --gone-bg: #221c18; --gone-line: #38302b;
+
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px -14px rgba(0,0,0,.7);
+  }
+}
+
+/* Explicit dark stamp wins over a light OS. Duplicated rather than shared
+   because a token declared only inside a media query never applies in the
+   un-stamped "system" state — the classic unreadable-artifact bug. */
+:root[data-theme="dark"] {
+  --bg: #0c0a09;
+  --app: #13100e;
+  --card: #191512;
+  --card2: #221c18;
+  --line: #2a2320;
+  --line2: #38302b;
+  --line-strong: #5c5049;
+
+  --ink: #f5f1ed;
+  --ink2: #d6cec7;
+  --muted: #a49a92;
+  --dim: #7d736c;
+
+  --accent: #ff7a18;
+  --accent-bg: #2b1608;
+  --accent-line: #6b3411;
+  --on-accent: #1a0c03;
+
+  --ok: #34d399;   --ok-bg: #0d2b20;   --ok-line: #1c4d38;
+  --warn: #fbbf24; --warn-bg: #2e2207; --warn-line: #5e4713;
+  --bad: #ff5470;  --bad-bg: #2e0f18;  --bad-line: #5e2031;
+  --gone: #a49a92; --gone-bg: #221c18; --gone-line: #38302b;
+
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px -14px rgba(0,0,0,.7);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--ink2);
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 15.5px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding-inline: 20px;
+  padding-block: 56px 96px;
+  display: flex;
+  flex-direction: column;
+  gap: 56px;
+}
+
+/* ── Type ──────────────────────────────────────────────────────────────── */
+h1, h2, h3 { color: var(--ink); text-wrap: balance; margin: 0; font-weight: 600; }
+h1 { font-size: clamp(30px, 5vw, 44px); letter-spacing: -.022em; line-height: 1.1; font-weight: 700; }
+h2 { font-size: clamp(20px, 3vw, 25px); letter-spacing: -.014em; }
+h3 { font-size: 16.5px; letter-spacing: -.005em; }
+p  { margin: 0; max-width: 68ch; }
+strong { color: var(--ink); font-weight: 600; }
+
+code, .mono { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace; }
+code {
+  font-size: .855em;
+  background: var(--card2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: .09em .34em;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.eyebrow {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.lede { font-size: 17.5px; color: var(--muted); max-width: 64ch; }
+
+section { display: flex; flex-direction: column; gap: 20px; }
+.sec-head { display: flex; flex-direction: column; gap: 7px; }
+
+/* ── The diagram ───────────────────────────────────────────────────────── */
+.figure {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.figure-scroll { overflow-x: auto; padding: 8px 8px 0; }
+svg.diagram { display: block; width: 100%; min-width: 720px; height: auto; }
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 26px;
+  padding: 14px 20px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--card2);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.swatch { display: inline-block; width: 22px; height: 0; border-top-width: 2px; border-top-style: solid; flex: none; }
+
+/* SVG text + shapes */
+.b-fill   { fill: var(--card2); }
+.b-line   { stroke: var(--line2); stroke-width: 1.25; fill: none; }
+.b-star   { stroke: var(--accent); stroke-width: 1.75; fill: none; }
+.b-starbg { fill: var(--accent-bg); }
+.t-title  { fill: var(--ink); font: 600 15px "IBM Plex Sans", sans-serif; }
+.t-port   { fill: var(--accent); font: 500 11.5px "IBM Plex Mono", monospace; letter-spacing: .04em; }
+.t-sub    { fill: var(--muted); font: 400 11.5px "IBM Plex Mono", monospace; }
+.t-arrow  { fill: var(--ink2); font: 500 11.5px "IBM Plex Mono", monospace; }
+.t-arrow-dim { fill: var(--muted); font: 400 11.5px "IBM Plex Mono", monospace; }
+.t-band   { fill: var(--dim); font: 500 11px "IBM Plex Mono", monospace; letter-spacing: .12em; }
+.t-step   { fill: var(--on-accent); font: 600 11px "IBM Plex Mono", monospace; }
+.step-dot { fill: var(--accent); }
+.a-hot    { stroke: var(--accent); stroke-width: 1.9; fill: none; }
+.a-cold   { stroke: var(--line-strong); stroke-width: 1.6; fill: none; }
+.a-dash   { stroke: var(--line-strong); stroke-width: 1.2; stroke-dasharray: 3 4; fill: none; }
+.band-hot { fill: var(--accent-bg); opacity: .5; }
+.band-cold{ fill: var(--app); }
+.note-box { fill: var(--card); stroke: var(--line2); stroke-width: 1; stroke-dasharray: 4 3; }
+
+/* ── The one idea ──────────────────────────────────────────────────────── */
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.lane {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 20px 22px 22px;
+  background: var(--card);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.lane.hot { border-color: var(--accent-line); background: var(--accent-bg); }
+.lane h3 { font-family: "IBM Plex Mono", monospace; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; }
+.lane.hot h3 { color: var(--accent); }
+.lane p { font-size: 14.5px; }
+.lane ul { margin: 0; padding-left: 17px; font-size: 14px; color: var(--muted); display: flex; flex-direction: column; gap: 5px; }
+
+/* ── Steps ─────────────────────────────────────────────────────────────── */
+.steps { display: flex; flex-direction: column; gap: 0; counter-reset: s; }
+.step {
+  display: grid;
+  grid-template-columns: 34px 1fr;
+  gap: 16px;
+  padding: 15px 0;
+  border-top: 1px solid var(--line);
+  align-items: start;
+}
+.step:last-child { border-bottom: 1px solid var(--line); }
+.step-n {
+  font-family: "IBM Plex Mono", monospace; font-size: 12px; font-weight: 600;
+  color: var(--accent); padding-top: 2px; font-variant-numeric: tabular-nums;
+}
+.step-body { display: flex; flex-direction: column; gap: 4px; }
+.step-body b { color: var(--ink); font-weight: 600; font-size: 15px; }
+.step-body span { color: var(--muted); font-size: 14.5px; }
+.where {
+  font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--dim);
+  margin-top: 2px;
+}
+
+/* ── Tables ────────────────────────────────────────────────────────────── */
+.t-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+table { border-collapse: collapse; width: 100%; min-width: 580px; font-size: 14.5px; }
+th {
+  text-align: left; font-family: "IBM Plex Mono", monospace; font-size: 11px;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
+  font-weight: 500; padding: 12px 18px; border-bottom: 1px solid var(--line);
+  background: var(--card2); white-space: nowrap;
+}
+td { padding: 13px 18px; border-bottom: 1px solid var(--line); color: var(--muted); vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+td:first-child { color: var(--ink); }
+td.num { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.pill {
+  display: inline-block; font-family: "IBM Plex Mono", monospace; font-size: 11.5px;
+  font-weight: 500; padding: 2.5px 9px; border-radius: 999px; border: 1px solid; white-space: nowrap;
+}
+.p-ok   { color: var(--ok);   background: var(--ok-bg);   border-color: var(--ok-line); }
+.p-warn { color: var(--warn); background: var(--warn-bg); border-color: var(--warn-line); }
+.p-bad  { color: var(--bad);  background: var(--bad-bg);  border-color: var(--bad-line); }
+.p-gone { color: var(--gone); background: var(--gone-bg); border-color: var(--gone-line); }
+
+/* ── Callout ───────────────────────────────────────────────────────────── */
+.callout {
+  border-left: 2.5px solid var(--warn);
+  background: var(--warn-bg);
+  padding: 16px 20px;
+  border-radius: 0 6px 6px 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.callout b { color: var(--ink); }
+.callout p { font-size: 14.5px; color: var(--ink2); }
+
+/* ── Numbers strip ─────────────────────────────────────────────────────── */
+.figures { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.fig { background: var(--card); padding: 18px 20px; display: flex; flex-direction: column; gap: 3px; }
+.fig .v { font-family: "IBM Plex Mono", monospace; font-size: 22px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.fig .k { font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+
+footer { color: var(--dim); font-size: 13px; border-top: 1px solid var(--line); padding-top: 22px; }
+
+@media (max-width: 760px) {
+  .split, .figures { grid-template-columns: 1fr; }
+  .wrap { gap: 44px; padding-block: 40px 72px; }
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="wrap">
+
+  <header class="sec-head">
+    <div class="eyebrow">System design</div>
+    <h1>LLM Gateway</h1>
+    <p class="lede">An authenticating proxy in front of the OpenAI API that records every request and response, streams the answer back untouched, and a dashboard for inspecting the traffic live.</p>
+  </header>
+
+  <!-- ══ DIAGRAM ══ -->
+  <section>
+    <div class="figure">
+      <div class="figure-scroll">
+        <svg class="diagram" viewBox="0 0 1080 700" role="img" aria-label="Architecture: a client app calls the gateway on port 4000, which swaps the API key and forwards to OpenAI or a mock, streaming the response straight back. Separately and asynchronously, the gateway batches log records to a backend on port 4020, which stores them in SQLite and pushes them over WebSocket to a dashboard on port 5173.">
+          <defs>
+            <marker id="ah-hot" viewBox="0 0 10 10" refX="9.2" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+              <path d="M0,0.6 L10,5 L0,9.4 Z" fill="var(--accent)"/>
+            </marker>
+            <marker id="ah-cold" viewBox="0 0 10 10" refX="9.2" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+              <path d="M0,0.6 L10,5 L0,9.4 Z" fill="var(--line-strong)"/>
+            </marker>
+          </defs>
+
+          <!-- bands -->
+          <rect class="band-hot"  x="0" y="58"  width="1080" height="166" rx="6"/>
+          <rect class="band-cold" x="0" y="286" width="1080" height="400" rx="6"/>
+          <text class="t-band" x="16" y="48">HOT PATH · THE CALLER IS WAITING</text>
+          <text class="t-band" x="16" y="276">COLD PATH · NOBODY IS WAITING</text>
+
+          <!-- ── row 1 ── -->
+          <!-- client -->
+          <rect class="b-fill" x="40" y="90" width="200" height="104" rx="5"/>
+          <rect class="b-line" x="40" y="90" width="200" height="104" rx="5"/>
+          <text class="t-title" x="60" y="124">client app</text>
+          <text class="t-sub"   x="60" y="146">any OpenAI SDK</text>
+          <text class="t-sub"   x="60" y="166">or curl, or fetch</text>
+
+          <!-- gateway -->
+          <rect class="b-starbg" x="420" y="76" width="240" height="132" rx="5"/>
+          <rect class="b-star"   x="420" y="76" width="240" height="132" rx="5"/>
+          <text class="t-title" x="442" y="110">GATEWAY</text>
+          <text class="t-port"  x="442" y="131">:4000</text>
+          <text class="t-sub"   x="442" y="156">authenticate · swap key</text>
+          <text class="t-sub"   x="442" y="174">reframe SSE · capture</text>
+          <text class="t-sub"   x="442" y="192">never touches the DB</text>
+
+          <!-- upstream -->
+          <rect class="b-fill" x="850" y="90" width="190" height="104" rx="5"/>
+          <rect class="b-line" x="850" y="90" width="190" height="104" rx="5"/>
+          <text class="t-title" x="870" y="124">OpenAI</text>
+          <text class="t-sub"   x="870" y="146">api.openai.com</text>
+          <text class="t-sub"   x="870" y="166">or mock :4010</text>
+
+          <!-- arrows out -->
+          <path class="a-hot" d="M242,122 L414,122" marker-end="url(#ah-hot)"/>
+          <circle class="step-dot" cx="266" cy="122" r="8.5"/>
+          <text class="t-step" x="266" y="126" text-anchor="middle">1</text>
+          <text class="t-arrow" x="332" y="112" text-anchor="middle">Bearer gw_live_…</text>
+
+          <path class="a-hot" d="M662,122 L844,122" marker-end="url(#ah-hot)"/>
+          <circle class="step-dot" cx="688" cy="122" r="8.5"/>
+          <text class="t-step" x="688" y="126" text-anchor="middle">2</text>
+          <text class="t-arrow" x="760" y="112" text-anchor="middle">Bearer sk-…</text>
+
+          <!-- arrows back -->
+          <path class="a-hot" d="M844,172 L664,172" marker-end="url(#ah-hot)"/>
+          <text class="t-arrow-dim" x="756" y="192" text-anchor="middle">SSE drip, or one JSON lump</text>
+
+          <path class="a-hot" d="M414,172 L244,172" marker-end="url(#ah-hot)"/>
+          <text class="t-arrow-dim" x="330" y="192" text-anchor="middle">forwarded byte-for-byte</text>
+
+          <!-- ── ingest ── -->
+          <path class="a-cold" d="M540,210 L540,332" marker-end="url(#ah-cold)"/>
+          <circle class="step-dot" cx="540" cy="243" r="8.5"/>
+          <text class="t-step" x="540" y="247" text-anchor="middle">3</text>
+          <text class="t-arrow" x="558" y="278">POST /ingest</text>
+          <text class="t-arrow-dim" x="558" y="297">batched · every 250 ms</text>
+          <text class="t-arrow-dim" x="558" y="315">fire and forget</text>
+
+          <!-- queue note -->
+          <rect class="note-box" x="118" y="344" width="232" height="96" rx="5"/>
+          <text class="t-sub" x="138" y="372" style="fill:var(--ink)">in-memory queue</text>
+          <text class="t-sub" x="138" y="394">10,000 max · drops oldest</text>
+          <text class="t-sub" x="138" y="412">retries while backend is down</text>
+          <text class="t-sub" x="138" y="430">counts what it dropped</text>
+          <path class="a-dash" d="M352,378 L528,286"/>
+
+          <!-- backend -->
+          <rect class="b-fill" x="420" y="340" width="240" height="120" rx="5"/>
+          <rect class="b-line" x="420" y="340" width="240" height="120" rx="5"/>
+          <text class="t-title" x="442" y="374">LOG BACKEND</text>
+          <text class="t-port"  x="442" y="395">:4020</text>
+          <text class="t-sub"   x="442" y="420">store it, then shout it</text>
+          <text class="t-sub"   x="442" y="440">never talks to OpenAI</text>
+
+          <!-- sqlite -->
+          <rect class="b-fill" x="762" y="358" width="184" height="84" rx="5"/>
+          <rect class="b-line" x="762" y="358" width="184" height="84" rx="5"/>
+          <text class="t-title" x="782" y="390">SQLite</text>
+          <text class="t-sub"   x="782" y="412">gateway.db · WAL</text>
+          <path class="a-cold" d="M662,400 L756,400" marker-end="url(#ah-cold)"/>
+          <circle class="step-dot" cx="686" cy="400" r="8.5"/>
+          <text class="t-step" x="686" y="404" text-anchor="middle">4</text>
+
+          <!-- two pipes -->
+          <path class="a-cold" d="M494,462 L494,566" marker-end="url(#ah-cold)"/>
+          <circle class="step-dot" cx="494" cy="492" r="8.5"/>
+          <text class="t-step" x="494" y="496" text-anchor="middle">5</text>
+          <text class="t-arrow"     x="474" y="528" text-anchor="end">push new rows</text>
+          <text class="t-arrow-dim" x="474" y="546" text-anchor="end">/api/stream · WS</text>
+
+          <path class="a-cold" d="M590,566 L590,464" marker-end="url(#ah-cold)"/>
+          <circle class="step-dot" cx="590" cy="492" r="8.5"/>
+          <text class="t-step" x="590" y="496" text-anchor="middle">6</text>
+          <text class="t-arrow"     x="610" y="528">ask for history</text>
+          <text class="t-arrow-dim" x="610" y="546">/api/logs · REST</text>
+
+          <!-- dashboard -->
+          <rect class="b-fill" x="420" y="576" width="240" height="98" rx="5"/>
+          <rect class="b-line" x="420" y="576" width="240" height="98" rx="5"/>
+          <text class="t-title" x="442" y="610">DASHBOARD</text>
+          <text class="t-port"  x="442" y="631">:5173</text>
+          <text class="t-sub"   x="442" y="656">React · live table · filters</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i class="swatch" style="border-top-color: var(--accent)"></i> hot path — a person is waiting on this</span>
+        <span><i class="swatch" style="border-top-color: var(--line-strong)"></i> cold path — can fail without anyone noticing</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ THE ONE IDEA ══ -->
+  <section>
+    <div class="sec-head">
+      <div class="eyebrow">The central decision</div>
+      <h2>Two paths that must never become one</h2>
+      <p>Every other choice in this system falls out of keeping these apart. The proxy is on the critical path; the logging deliberately is not.</p>
+    </div>
+    <div class="split">
+      <div class="lane hot">
+        <h3>Hot path</h3>
+        <p><strong>Your app is blocked on this.</strong> Every millisecond spent here is a millisecond a user spends looking at a spinner.</p>
+        <ul>
+          <li>Authenticate, swap the key, forward</li>
+          <li>Push each SSE frame through the instant it lands</li>
+          <li><code>sink.write()</code> returns <code>void</code> — it cannot be awaited, so it cannot slow anything down</li>
+          <li>A logging failure is caught and swallowed; it never becomes a caller-facing error</li>
+        </ul>
+      </div>
+      <div class="lane">
+        <h3>Cold path</h3>
+        <p><strong>Nobody is waiting.</strong> It can be slow, it can retry, it can be down for an hour, and no request ever fails because of it.</p>
+        <ul>
+          <li>Records batch up and ship on a 250 ms timer</li>
+          <li>Backend down? The batch goes back on the queue and tries again</li>
+          <li>Queue full? Oldest records drop — and the count is surfaced, so the loss is visible rather than silent</li>
+          <li>Measured: a log arrived <strong>98 ms after</strong> the caller already had its last token</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ LIFECYCLE ══ -->
+  <section>
+    <div class="sec-head">
+      <div class="eyebrow">Request lifecycle</div>
+      <h2>What happens, in order</h2>
+    </div>
+    <div class="steps">
+      <div class="step"><div class="step-n">01</div><div class="step-body">
+        <b>The badge check</b>
+        <span>The caller's <code>Authorization</code> header is matched against the issued gateway keys. No match, no forward — OpenAI is never dialled, so a bad key costs nothing.</span>
+        <div class="where">gateway/src/app.ts · authenticate()</div>
+      </div></div>
+      <div class="step"><div class="step-n">02</div><div class="step-body">
+        <b>The key swap</b>
+        <span>Headers are rebuilt from an allowlist, then <code>authorization</code> is overwritten with the real upstream key. The caller's key dies here; the real key never leaves the process.</span>
+        <div class="where">gateway/src/app.ts:104</div>
+      </div></div>
+      <div class="step"><div class="step-n">03</div><div class="step-body">
+        <b>One fetch</b>
+        <span>No SDK — a proxy wants bytes, not parsed objects. The route is <code>app.all('/v1/*')</code>, so any endpoint works without a code change. The caller's abort signal is wired through, so hanging up stops the meter upstream.</span>
+        <div class="where">gateway/src/app.ts:140</div>
+      </div></div>
+      <div class="step"><div class="step-n">04</div><div class="step-body">
+        <b>Lump or drip?</b>
+        <span>Decided by the response's <code>content-type</code>, not by what the caller asked for — a request can say <code>stream: true</code> and still get a plain JSON error back. Trust what actually arrived.</span>
+        <div class="where">gateway/src/app.ts:181</div>
+      </div></div>
+      <div class="step"><div class="step-n">05</div><div class="step-body">
+        <b>Reframe, forward, capture</b>
+        <span>TCP splits SSE events anywhere — mid-frame, mid-emoji. A reframer holds partials until a whole event exists, forwards it untouched, and copies the text into a running notebook on the side. TTFT is stamped on the first real token.</span>
+        <div class="where">gateway/src/sse.ts · gateway/src/capture.ts</div>
+      </div></div>
+      <div class="step"><div class="step-n">06</div><div class="step-body">
+        <b>Ship it, off the request path</b>
+        <span>The finished record is pushed onto an array and forgotten. A timer batches and POSTs it to the backend long after the caller has hung up.</span>
+        <div class="where">gateway/src/sink.ts</div>
+      </div></div>
+      <div class="step"><div class="step-n">07</div><div class="step-body">
+        <b>Store it, then shout it</b>
+        <span>The backend writes the row to SQLite and simultaneously pushes it down every open WebSocket whose key matches. Filters are applied server-side, so a filtered view stays live without shipping rows the browser would discard.</span>
+        <div class="where">backend/src/db.ts · backend/src/ws.ts</div>
+      </div></div>
+    </div>
+  </section>
+
+  <!-- ══ TERMINAL STATES ══ -->
+  <section>
+    <div class="sec-head">
+      <div class="eyebrow">Why four endings and not two</div>
+      <h2>A 200 can be a lie</h2>
+      <p>On a streamed response the status code is committed before the answer exists. Anything that goes wrong afterwards still arrives under a <code>200 OK</code> — which is exactly the failure a status-code logger cannot see.</p>
+    </div>
+    <div class="t-wrap">
+      <table>
+        <thead><tr><th>Terminal state</th><th>What happened</th><th>Status on the wire</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="pill p-ok">completed</span></td>
+            <td>The <code>[DONE]</code> sentinel arrived. The answer is whole.</td>
+            <td class="num">200</td>
+          </tr>
+          <tr>
+            <td><span class="pill p-warn">truncated</span></td>
+            <td>Frames simply stopped and no <code>[DONE]</code> ever came. Nobody raised an error anywhere.</td>
+            <td class="num">200 — misleading</td>
+          </tr>
+          <tr>
+            <td><span class="pill p-bad">upstream_error</span></td>
+            <td>An <code>error</code> object arrived inside a frame, after the headers were already sent.</td>
+            <td class="num">200 — misleading</td>
+          </tr>
+          <tr>
+            <td><span class="pill p-gone">client_aborted</span></td>
+            <td>The caller hung up mid-stream. The upstream request is cancelled too, so generation stops being billed.</td>
+            <td class="num">499</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p>On the non-streaming path only the first and third are reachable: <code>await upstream.text()</code> either returns the whole body or throws. <strong>You cannot half-succeed at a lump.</strong> Streaming is the only mode that needed four.</p>
+  </section>
+
+  <!-- ══ FAILURE MODES ══ -->
+  <section>
+    <div class="sec-head">
+      <div class="eyebrow">Failure modes</div>
+      <h2>What breaks, and who notices</h2>
+    </div>
+    <div class="t-wrap">
+      <table>
+        <thead><tr><th>When this fails</th><th>The caller sees</th><th>The dashboard shows</th></tr></thead>
+        <tbody>
+          <tr><td>Backend is down</td><td>Nothing. Full response, normal latency.</td><td>Nothing new — then everything at once when it returns</td></tr>
+          <tr><td>Backend down past 10,000 records</td><td>Still nothing</td><td>Oldest logs gone, with a banner naming the count</td></tr>
+          <tr><td>Gateway is killed mid-flight</td><td>Connection drops</td><td>Queued records are lost — at-most-once, by design</td></tr>
+          <tr><td>OpenAI unreachable</td><td><code>502</code></td><td>A row with <code>status: 0</code> and the error text</td></tr>
+          <tr><td>Caller hangs up mid-stream</td><td>Its own disconnect</td><td><span class="pill p-gone">client_aborted</span>, partial text, tokens so far</td></tr>
+          <tr><td>One dashboard sends a malformed filter</td><td>Nothing</td><td>That one tab is dropped; every other tenant keeps streaming</td></tr>
+          <tr><td>Gateway key is wrong</td><td><code>401</code>, nothing forwarded</td><td><strong>Nothing — see below</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout">
+      <b>Known gap: rejected keys leave no trace.</b>
+      <p>The auth check returns at line 60; the log emitter isn't constructed until line 130. So a 401 short-circuits before anything can be recorded — and "someone is trying keys against my gateway" is precisely what an inspector should surface. The fix is small: move the check below <code>emit</code> and write a row with a null <code>apiKeyId</code>. Worth naming out loud rather than leaving to be found.</p>
+    </div>
+  </section>
+
+  <!-- ══ RUN MODES ══ -->
+  <section>
+    <div class="sec-head">
+      <div class="eyebrow">One system, three configurations</div>
+      <h2>The seam that lets you test is the seam that lets you swap providers</h2>
+      <p>Nothing in the code knows which mode it is running in. The gateway cannot tell OpenAI from a pretend OpenAI on port 4010, and the proxy logic does not change when the log destination does.</p>
+    </div>
+    <div class="t-wrap">
+      <table>
+        <thead><tr><th>Mode</th><th>UPSTREAM_BASE_URL</th><th>LOG_SINK</th><th>What it buys</th></tr></thead>
+        <tbody>
+          <tr><td>Tests</td><td class="num">mock :4010</td><td class="num">memory</td><td>89 tests, ~11 s, no network, no key — every failure case forceable on demand</td></tr>
+          <tr><td>Local demo</td><td class="num">mock :4010</td><td class="num">http</td><td>The whole pipeline end to end, at zero cost</td></tr>
+          <tr><td>Real</td><td class="num">api.openai.com</td><td class="num">http</td><td>Actual latency, actual tokens, actual money</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ══ NUMBERS ══ -->
+  <section>
+    <div class="sec-head">
+      <div class="eyebrow">Measured, not assumed</div>
+      <h2>Known ceilings</h2>
+    </div>
+    <div class="figures">
+      <div class="fig"><div class="v">3,200/s</div><div class="k">Log shipping ceiling — 200 per batch × 4 in flight ÷ 250 ms. The first limit this system hits, well before SQLite.</div></div>
+      <div class="fig"><div class="v">~400 rps</div><div class="k">Proxy throughput before TTFT p50 moves off 6.1 ms.</div></div>
+      <div class="fig"><div class="v">7 ms</div><div class="k">Spread between first and last token arrival under load — proof the stream is passed through, not buffered. Buffering would show 440 ms.</div></div>
+      <div class="fig"><div class="v">98 ms</div><div class="k">How long after the caller's last token the log was POSTed. Asynchronous, demonstrated rather than claimed.</div></div>
+    </div>
+  </section>
+
+  <footer>
+    Node 22+ · TypeScript · Hono · React · <code>node:sqlite</code> — no Docker, no database server, nothing compiled at install time.
+  </footer>
+
+</div>

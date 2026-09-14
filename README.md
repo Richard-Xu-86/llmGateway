@@ -19,6 +19,45 @@ the traffic live.
                                             └──────────────┘                    └────────────┘
 ```
 
+The box diagram hides the decision the whole design turns on, which is *when*
+each arrow fires rather than where it points:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as client app
+    participant GW as gateway :4000
+    participant AI as OpenAI
+    participant BE as backend :4020
+    participant UI as dashboard :5173
+
+    App->>GW: POST /v1/chat/completions<br/>Bearer gw_live_…
+    Note over GW: key checked against the issued list<br/>no match → 401, upstream never dialled
+    GW->>AI: same body, same path<br/>Bearer sk-…
+
+    loop every SSE frame
+        AI-->>GW: data: {"delta":{"content":"…"}}
+        GW-->>App: forwarded byte-for-byte, immediately
+        Note right of GW: reframed, then copied into<br/>the capture on the way past
+    end
+
+    AI-->>GW: data: [DONE]
+    GW-->>App: stream closes — the caller is finished here
+    Note over App,GW: everything above is the hot path.<br/>a person is waiting on every millisecond of it.
+
+    GW->>GW: sink.write(record) — push onto an array, return void
+    Note over GW,BE: measured 98 ms later, with the caller long gone
+    GW->>BE: POST /ingest (batched, every 250 ms, fire-and-forget)
+    BE->>BE: INSERT OR REPLACE into SQLite
+    BE-->>UI: push the row over WebSocket
+    UI->>BE: GET /api/logs for history (separate pipe)
+```
+
+The gateway never touches the database, the backend never talks to OpenAI, and
+nothing on the second half of that diagram can fail in a way the caller can
+feel. [`docs/architecture.html`](docs/architecture.html) has the same system as
+a single page, with the failure modes and terminal states laid out beside it.
+
 ## Quick start
 
 No OpenAI key, no Docker, no database, no global tooling. Node 22+ is the only
@@ -33,7 +72,7 @@ npm run dev
 That starts all four services — mock upstream, gateway, log backend, dashboard.
 
 ```bash
-npm test         # 64 tests, ~9s, no network, no API key
+npm test         # 89 tests, ~11s, no network, no API key
 npm run typecheck
 ```
 
@@ -365,18 +404,15 @@ examples/
 
 ## Scaling
 
-[`docs/scaling.md`](docs/scaling.md) works the problem at a million requests per
-second: where the bottlenecks are, in the order they break, with the arithmetic.
+The proxy tier scales by buying machines — it is stateless already. The logging
+plane does not, in its current shape: one stored record per request is 4 GB/s
+and 345 TB/day at a million requests per second, and no choice of database fixes
+that. The answer is to split metrics (aggregated, every request, forever) from
+traces (sampled, full fidelity, short retention), which is worth roughly 100x
+before any infrastructure changes.
 
-The summary is that the proxy tier scales by buying machines — it is stateless
-and already is — and the logging plane does not scale in its current shape at
-all. One stored record per request is 4 GB/s and 345 TB/day at that rate, which
-no choice of database fixes. The answer is to split metrics (aggregated, every
-request, forever) from traces (sampled, full fidelity, short retention), which is
-worth roughly 100× before any infrastructure changes.
-
-Two findings from that exercise are already fixed here, because they were cheap
-and real:
+Two findings from working that through are already fixed here, because they were
+cheap and real:
 
 - **The first ceiling was 200 records/sec** — one batch of 50 every 250ms, one
   request in flight. The sink now runs several batches concurrently, since the
