@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { UPSTREAM_SECRET, postChat, readEvents, sleep, startStack, waitForLog } from './helpers.ts';
+import {
+  TEST_KEY,
+  UPSTREAM_SECRET,
+  postChat,
+  readEvents,
+  sleep,
+  startStack,
+  waitForLog,
+} from './helpers.ts';
 
 let stack: Awaited<ReturnType<typeof startStack>>;
 
@@ -35,6 +43,40 @@ describe('what gets written down', () => {
     expect(rec.ttftMs).toBeGreaterThanOrEqual(0);
     expect(rec.requestBody).toContain('"messages"');
     expect(rec.apiKeyName).toBe('demo-app');
+  });
+
+  it('records the URL the caller requested, and separately where it was sent', async () => {
+    // The brief asks for the URL of the intercepted request, so `url` is the
+    // one the caller asked the proxy for — that is also what the URL filter
+    // searches and what "copy as cURL" reproduces, both of which would be
+    // wrong if it held the upstream address.
+    //
+    // `upstreamUrl` is kept alongside because every upstream shares the same
+    // paths: without it nothing distinguishes a call that reached OpenAI from
+    // one that hit the mock.
+    const res = await fetch(`${stack.gatewayUrl}/v1/chat/completions?debug=1&tier=free`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${TEST_KEY}`,
+        'content-type': 'application/json',
+        'x-mock-chunks': '2',
+        'x-mock-gap-ms': '1',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    const id = res.headers.get('x-gateway-request-id')!;
+    await drain(res);
+
+    const rec = await waitForLog(stack.sink, id);
+    expect(rec.url).toBe(`${stack.gatewayUrl}/v1/chat/completions?debug=1&tier=free`);
+    expect(rec.upstreamUrl).toBe(`${stack.mockUrl}/v1/chat/completions?debug=1&tier=free`);
+    expect(rec.path).toBe('/v1/chat/completions'); // path stays clean for grouping
+    // The query string has to survive on both, or the URL filter goes blind to it.
+    expect(rec.url).toContain('tier=free');
   });
 
   it('never stores the caller key or the upstream key', async () => {

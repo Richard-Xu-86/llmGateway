@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   started_at INTEGER NOT NULL,
   method TEXT NOT NULL,
   url TEXT NOT NULL,
+  upstream_url TEXT,
   path TEXT NOT NULL,
   model TEXT,
   is_stream INTEGER NOT NULL,
@@ -47,6 +48,27 @@ export class LogStore {
     this.#db.exec('PRAGMA journal_mode = WAL');
     this.#db.exec('PRAGMA synchronous = NORMAL');
     this.#db.exec(SCHEMA);
+    this.#migrate();
+  }
+
+  /**
+   * `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists,
+   * so a new column in SCHEMA never reaches an existing database — the next
+   * insert just fails. Adding columns idempotently here means someone who has
+   * been running this since yesterday keeps their rows.
+   *
+   * Deliberately minimal: additive columns only, no data rewriting. Anything
+   * beyond that wants a real migration tool with ordered, recorded steps.
+   */
+  #migrate(): void {
+    const columns = new Set(
+      (this.#db.prepare('PRAGMA table_info(request_logs)').all() as any[]).map(
+        (c) => c.name as string,
+      ),
+    );
+    if (!columns.has('upstream_url')) {
+      this.#db.exec('ALTER TABLE request_logs ADD COLUMN upstream_url TEXT');
+    }
   }
 
   /**
@@ -55,39 +77,60 @@ export class LogStore {
    * The gateway's sink retries a failed batch, which makes delivery
    * at-least-once. An idempotent write on a caller-supplied id turns that back
    * into effectively-once without a dedupe table.
+   *
+   * The whole batch runs in one transaction. Without it each row is its own
+   * implicit transaction and its own WAL commit, which is an order of magnitude
+   * slower and leaves a failed batch half-applied.
    */
   insert(records: LogRecord[]): void {
+    if (records.length === 0) return;
+    // Columns named rather than positional: a bare VALUES(...) list silently
+    // shifts every field by one the moment a column is added.
     const stmt = this.#db.prepare(`
-      INSERT OR REPLACE INTO request_logs VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      INSERT OR REPLACE INTO request_logs (
+        id, api_key_id, api_key_name, started_at, method, url, upstream_url, path,
+        model, is_stream, request_headers, request_body, request_body_truncated,
+        status, response_headers, response_body, response_body_truncated,
+        duration_ms, ttft_ms, chunk_count, prompt_tokens, completion_tokens,
+        terminal_state, finish_reason, error
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       )`);
-    for (const r of records) {
-      stmt.run(
-        r.id,
-        r.apiKeyId,
-        r.apiKeyName,
-        r.startedAt,
-        r.method,
-        r.url,
-        r.path,
-        r.model,
-        r.isStream ? 1 : 0,
-        JSON.stringify(r.requestHeaders),
-        r.requestBody,
-        r.requestBodyTruncated ? 1 : 0,
-        r.status,
-        JSON.stringify(r.responseHeaders),
-        r.responseBody,
-        r.responseBodyTruncated ? 1 : 0,
-        r.durationMs,
-        r.ttftMs,
-        r.chunkCount,
-        r.promptTokens,
-        r.completionTokens,
-        r.terminalState,
-        r.finishReason,
-        r.error,
-      );
+    this.#db.exec('BEGIN');
+    try {
+      for (const r of records) {
+        stmt.run(
+          r.id,
+          r.apiKeyId,
+          r.apiKeyName,
+          r.startedAt,
+          r.method,
+          r.url,
+          r.upstreamUrl,
+          r.path,
+          r.model,
+          r.isStream ? 1 : 0,
+          JSON.stringify(r.requestHeaders),
+          r.requestBody,
+          r.requestBodyTruncated ? 1 : 0,
+          r.status,
+          JSON.stringify(r.responseHeaders),
+          r.responseBody,
+          r.responseBodyTruncated ? 1 : 0,
+          r.durationMs,
+          r.ttftMs,
+          r.chunkCount,
+          r.promptTokens,
+          r.completionTokens,
+          r.terminalState,
+          r.finishReason,
+          r.error,
+        );
+      }
+      this.#db.exec('COMMIT');
+    } catch (err) {
+      this.#db.exec('ROLLBACK');
+      throw err; // the ingest handler turns this into a 500, and the sink retries
     }
   }
 
@@ -118,6 +161,12 @@ export class LogStore {
     if (filters.q) {
       where.push('url LIKE ?');
       params.push(`%${filters.q}%`);
+    }
+    if (filters.windowMs) {
+      // Resolved here, not on the client, so the window stays relative to now
+      // on every query. Rides the (api_key_id, started_at DESC) index.
+      where.push('started_at >= ?');
+      params.push(Date.now() - filters.windowMs);
     }
     if (cursor) {
       // Keyset pagination: stable under inserts, unlike OFFSET.
@@ -229,6 +278,7 @@ function toRecord(row: any): LogRecord {
     startedAt: row.started_at,
     method: row.method,
     url: row.url,
+    upstreamUrl: row.upstream_url ?? null,
     path: row.path,
     model: row.model,
     isStream: row.is_stream === 1,
@@ -268,6 +318,10 @@ export function matchesFilters(row: LogSummary, filters: Filters, url = ''): boo
     if (!filters.statusClasses.includes(cls)) return false;
   }
   if (filters.q && !url.toLowerCase().includes(filters.q.toLowerCase())) return false;
+  // A live row is by definition recent, so this rarely rejects anything — but
+  // the two predicates have to stay identical or a filtered view shows rows on
+  // arrival that disappear on refresh.
+  if (filters.windowMs && row.startedAt < Date.now() - filters.windowMs) return false;
   return true;
 }
 

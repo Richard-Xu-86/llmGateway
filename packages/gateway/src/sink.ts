@@ -32,6 +32,8 @@ export interface HttpSinkOptions {
   maxQueue?: number;
   batchSize?: number;
   intervalMs?: number;
+  /** How many batches may be in flight at once. See the note on throughput. */
+  concurrency?: number;
 }
 
 /**
@@ -43,19 +45,26 @@ export interface HttpSinkOptions {
  * crash loses whatever is still queued. A production version writes to a local
  * WAL or a broker instead. The dropped counter is exposed so the loss is
  * visible rather than silent.
+ *
+ * On throughput: drain rate is `batchSize × concurrency / intervalMs`, and it is
+ * the first ceiling this system hits — well before SQLite or the proxy itself.
+ * With one batch of 50 every 250ms it was 200 records/sec. Allowing several
+ * batches in flight matters more than the batch size, because the limit is
+ * round-trip latency rather than bytes. See docs/scaling.md.
  */
 export class HttpSink implements LogSink {
   #queue: LogRecord[] = [];
   #dropped = 0;
   #timer: NodeJS.Timeout;
-  #inFlight = false;
+  #inFlight = 0;
   readonly #opts: Required<HttpSinkOptions>;
 
   constructor(opts: HttpSinkOptions) {
     this.#opts = {
       maxQueue: 10_000,
-      batchSize: 50,
+      batchSize: 200,
       intervalMs: 250,
+      concurrency: 4,
       ...opts,
     };
     this.#timer = setInterval(() => void this.#drain(), this.#opts.intervalMs);
@@ -74,22 +83,35 @@ export class HttpSink implements LogSink {
     this.#queue.push(record);
   }
 
+  /** Fills every free concurrency slot from the queue. */
   async #drain(): Promise<void> {
-    if (this.#inFlight || this.#queue.length === 0) return;
-    this.#inFlight = true;
-    const batch = this.#queue.splice(0, this.#opts.batchSize);
+    const sending: Array<Promise<void>> = [];
+    while (this.#inFlight < this.#opts.concurrency && this.#queue.length > 0) {
+      sending.push(this.#send(this.#queue.splice(0, this.#opts.batchSize)));
+    }
+    await Promise.all(sending);
+  }
+
+  async #send(batch: LogRecord[]): Promise<void> {
+    this.#inFlight += 1;
     try {
       const res = await fetch(this.#opts.url, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-ingest-secret': this.#opts.secret },
-        body: JSON.stringify({ records: batch }),
+        // The drop count rides the batch rather than getting its own endpoint:
+        // it is monotonic, so whatever arrives last is correct, and a backend
+        // that was down learns the number on the first batch that gets through.
+        body: JSON.stringify({ records: batch, droppedTotal: this.#dropped }),
       });
       if (!res.ok) throw new Error(`ingest responded ${res.status}`);
     } catch {
-      // Put them back at the front so ordering survives a transient failure.
+      // Back to the front, so a transient failure costs ordering rather than
+      // data. Ordering across concurrent batches is best-effort by definition —
+      // the backend's INSERT OR REPLACE on a caller-supplied id is what makes
+      // that safe, and the dashboard sorts by started_at regardless.
       this.#queue.unshift(...batch);
     } finally {
-      this.#inFlight = false;
+      this.#inFlight -= 1;
     }
   }
 

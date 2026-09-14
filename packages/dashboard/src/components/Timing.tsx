@@ -43,7 +43,7 @@ export function Timing({ record }: { record: LogRecord }) {
       </div>
       <div className="legend">
         <span>
-          <span className="sw" style={{ background: '#2c2f3a' }} />
+          <span className="sw" style={{ background: 'var(--wait)' }} />
           waiting for first token
         </span>
         <span>

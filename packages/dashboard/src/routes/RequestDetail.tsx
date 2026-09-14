@@ -67,6 +67,18 @@ export function RequestDetail() {
           <h2 className="mono">
             {record.method} {record.path}
           </h2>
+          {/* Both URLs, because they answer different questions: what the
+              caller asked the proxy for, and where the proxy sent it. The
+              second is the only thing on screen that distinguishes a call
+              that reached api.openai.com from one that hit the local mock. */}
+          <div className="durl mono small" title={record.url}>
+            {record.url}
+          </div>
+          {record.upstreamUrl && (
+            <div className="durl up mono small" title={record.upstreamUrl}>
+              <span className="arrow">→</span> {record.upstreamUrl}
+            </div>
+          )}
           <div className="dim mono small" style={{ marginTop: 3 }}>
             {record.id}
           </div>

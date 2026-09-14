@@ -19,7 +19,8 @@ function record(over: Partial<LogRecord> = {}): LogRecord {
     apiKeyName: 'app-a',
     startedAt: Date.now(),
     method: 'POST',
-    url: 'https://api.openai.com/v1/chat/completions',
+    url: 'http://localhost:4000/v1/chat/completions',
+    upstreamUrl: 'https://api.openai.com/v1/chat/completions',
     path: '/v1/chat/completions',
     model: 'gpt-4o-mini',
     isStream: true,
@@ -72,6 +73,34 @@ describe('ingest', () => {
       body: JSON.stringify({ records: [{ id: 'nope' }] }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it('carries the gateway\'s dropped count through to the dashboard', async () => {
+    // The counter lives in the gateway process, so silent log loss stays silent
+    // unless the number travels. It rides the batch.
+    await app.request('/ingest', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-ingest-secret': SECRET },
+      body: JSON.stringify({ records: [record()], droppedTotal: 17 }),
+    });
+
+    const stats = await (await asKey(KEY_A, '/api/stats')).json();
+    expect(stats.droppedRecords).toBe(17);
+  });
+
+  it('never walks the dropped count backwards', async () => {
+    const send = (droppedTotal: number) =>
+      app.request('/ingest', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-ingest-secret': SECRET },
+        body: JSON.stringify({ records: [record()], droppedTotal }),
+      });
+
+    await send(40);
+    await send(12); // a batch that was queued before the drops happened
+
+    const stats = await (await asKey(KEY_A, '/api/stats')).json();
+    expect(stats.droppedRecords).toBe(40);
   });
 
   it('is idempotent, so a retried batch does not duplicate rows', async () => {
@@ -167,6 +196,53 @@ describe('filters', () => {
 
   it('combines filters', async () => {
     expect(await rowsFor('?methods=POST&status=2xx')).toHaveLength(1);
+  });
+});
+
+describe('the time window', () => {
+  const HOUR = 60 * 60 * 1000;
+
+  beforeEach(async () => {
+    await ingest([
+      record({ startedAt: Date.now() - 5 * 60 * 1000 }), // 5 minutes ago
+      record({ startedAt: Date.now() - 3 * HOUR }), // 3 hours ago
+      record({ startedAt: Date.now() - 3 * 24 * HOUR }), // 3 days ago
+    ]);
+  });
+
+  const rowsFor = async (query: string) =>
+    (await (await asKey(KEY_A, `/api/logs${query}`)).json()).rows;
+
+  it('is relative, so it keeps meaning the same thing as time passes', async () => {
+    // windowMs rather than an absolute `since`: the client sends a duration and
+    // the server resolves it against its own clock on every query.
+    expect(await rowsFor(`?windowMs=${HOUR}`)).toHaveLength(1);
+    expect(await rowsFor(`?windowMs=${24 * HOUR}`)).toHaveLength(2);
+    expect(await rowsFor(`?windowMs=${7 * 24 * HOUR}`)).toHaveLength(3);
+  });
+
+  it('returns everything when no window is given', async () => {
+    expect(await rowsFor('')).toHaveLength(3);
+  });
+
+  it('ignores a nonsense window rather than returning nothing', async () => {
+    expect(await rowsFor('?windowMs=banana')).toHaveLength(3);
+    expect(await rowsFor('?windowMs=-5')).toHaveLength(3);
+  });
+
+  it('clamps an absurd window so a caller cannot ask for a full scan', async () => {
+    // A century would be an unbounded scan on a real table.
+    const stats = await (await asKey(KEY_A, '/api/stats?windowMs=999999999999999')).json();
+    expect(stats.current.total).toBe(3); // 30-day ceiling still covers the fixtures
+  });
+
+  it('agrees with the live predicate, so windowed views stay consistent', async () => {
+    const fresh = summarise(record({ startedAt: Date.now() - 60_000 }));
+    const old = summarise(record({ startedAt: Date.now() - 3 * 24 * HOUR }));
+
+    expect(matchesFilters(fresh, { windowMs: HOUR })).toBe(true);
+    expect(matchesFilters(old, { windowMs: HOUR })).toBe(false);
+    expect(matchesFilters(old, { windowMs: 7 * 24 * HOUR })).toBe(true);
   });
 });
 

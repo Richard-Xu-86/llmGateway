@@ -16,6 +16,7 @@ import { Hono } from 'hono';
  *   x-mock-first-delay-ms  delay before the first chunk   (default 0)
  *   x-mock-fail-after      emit an in-band error after N chunks
  *   x-mock-status          reply with this status and no stream
+ *   x-mock-split-at        cut every frame after N bytes, send the halves apart
  *   x-mock-request-id      tag this request so a test can read its stats back
  */
 
@@ -69,7 +70,7 @@ app.post('/v1/chat/completions', async (c) => {
 
   const body = await c.req.json<Record<string, any>>().catch(() => ({}) as Record<string, any>);
   const model = typeof body.model === 'string' ? body.model : 'gpt-4o-mini';
-  const wantsUsage = body?.stream_options?.include_usage === true;
+  let wantsUsage = body?.stream_options?.include_usage === true;
 
   const chunks = num(h('x-mock-chunks'), 8);
   const gapMs = num(h('x-mock-gap-ms'), 40);
@@ -104,6 +105,20 @@ app.post('/v1/chat/completions', async (c) => {
   let i = 0;
   let closed = false;
 
+  /**
+   * x-mock-split-at N cuts every frame after N bytes and sends the halves in
+   * two writes, which is what a real upstream does to you all the time: TCP has
+   * no idea what an SSE event is. A well-behaved proxy must cope with a read
+   * that contains no complete event at all.
+   *
+   * Worth a mock feature of its own, because without it every frame arrives
+   * whole and a proxy that mishandles partials looks perfect right up until it
+   * meets api.openai.com.
+   */
+  const splitAt = num(h('x-mock-split-at'), 0);
+  let pendingTail: Uint8Array | null = null;
+  let closeAfterTail = false;
+
   // pull-driven on purpose: if the consumer stops reading, `pull` stops being
   // called and `s.emitted` stops climbing. That is how the back-pressure test
   // observes that back-pressure actually reaches the upstream.
@@ -117,6 +132,34 @@ app.post('/v1/chat/completions', async (c) => {
         return;
       }
 
+      // Second half of a split frame. The gap is what makes it a separate TCP
+      // segment rather than a coalesced write.
+      if (pendingTail !== null) {
+        await sleep(Math.max(gapMs, 5));
+        const tail = pendingTail;
+        pendingTail = null;
+        controller.enqueue(tail);
+        if (closeAfterTail) {
+          s.completed = true;
+          closed = true;
+          controller.close();
+        }
+        return;
+      }
+
+      /** Enqueue a whole frame, or its first half if splitting is on. */
+      const frame = (text: string, closeAfter = false) => {
+        const bytes = enc.encode(text);
+        if (splitAt > 0 && bytes.byteLength > splitAt) {
+          controller.enqueue(bytes.subarray(0, splitAt));
+          pendingTail = bytes.subarray(splitAt);
+          closeAfterTail = closeAfter;
+          return false; // not finished with this frame yet
+        }
+        controller.enqueue(bytes);
+        return true;
+      };
+
       if (i === 0 && firstDelayMs > 0) await sleep(firstDelayMs);
       else if (i > 0) await sleep(gapMs);
 
@@ -128,44 +171,49 @@ app.post('/v1/chat/completions', async (c) => {
       }
 
       if (failAfter !== null && i >= failAfter) {
-        controller.enqueue(
-          enc.encode(
-            `data: ${JSON.stringify({
-              error: { message: 'mock upstream exploded mid-stream', type: 'server_error' },
-            })}\n\n`,
-          ),
+        frame(
+          `data: ${JSON.stringify({
+            error: { message: 'mock upstream exploded mid-stream', type: 'server_error' },
+          })}\n\n`,
+          true,
         );
         s.errored = true;
-        closed = true;
-        controller.close();
+        if (pendingTail === null) {
+          closed = true;
+          controller.close();
+        }
         return;
       }
 
       if (i < chunks) {
-        controller.enqueue(enc.encode(`data: ${JSON.stringify(contentChunk(i, model))}\n\n`));
+        frame(`data: ${JSON.stringify(contentChunk(i, model))}\n\n`);
         s.emitted++;
         i++;
         return;
       }
 
       if (wantsUsage) {
-        controller.enqueue(
-          enc.encode(
-            `data: ${JSON.stringify({
-              id: 'chatcmpl-mock',
-              object: 'chat.completion.chunk',
-              model,
-              choices: [],
-              usage: {
-                prompt_tokens: 11,
-                completion_tokens: chunks,
-                total_tokens: 11 + chunks,
-              },
-            })}\n\n`,
-          ),
+        wantsUsage = false;
+        frame(
+          `data: ${JSON.stringify({
+            id: 'chatcmpl-mock',
+            object: 'chat.completion.chunk',
+            model,
+            choices: [],
+            usage: {
+              prompt_tokens: 11,
+              completion_tokens: chunks,
+              total_tokens: 11 + chunks,
+            },
+          })}\n\n`,
         );
+        // Splitting the usage frame means the caller-visible stream gets a read
+        // that yields nothing at all once the gateway strips it — the exact
+        // shape that used to deadlock. The tail goes out on the next pull.
+        return;
       }
-      controller.enqueue(enc.encode('data: [DONE]\n\n'));
+
+      if (!frame('data: [DONE]\n\n', true)) return;
       s.completed = true;
       closed = true;
       controller.close();

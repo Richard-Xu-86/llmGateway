@@ -14,10 +14,31 @@ export interface BackendConfig {
 const list = (value: string | undefined): string[] | undefined =>
   value ? value.split(',').map((v) => v.trim()).filter(Boolean) : undefined;
 
+/**
+ * A look-back window, clamped. An unbounded one is an unbounded table scan that
+ * any caller could ask for, so 30 days is the ceiling regardless of what
+ * arrives. Returns undefined for anything unusable, which means "no limit
+ * beyond the page size".
+ */
+const MAX_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+const window = (value: string | undefined): number | undefined => {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, MAX_WINDOW_MS) : undefined;
+};
+
 export function createBackend({ store, hub, keys, ingestSecret }: BackendConfig) {
   const app = new Hono();
 
-  app.get('/healthz', (c) => c.json({ ok: true, subscribers: hub.size }));
+  /**
+   * Records the gateway dropped under back-pressure, as last reported.
+   *
+   * The counter lives in the gateway process, so it has to travel; it rides the
+   * ingest batch rather than getting a channel of its own. Held in memory
+   * because it describes this run of the gateway, not the history of the data.
+   */
+  let droppedRecords = 0;
+
+  app.get('/healthz', (c) => c.json({ ok: true, subscribers: hub.size, droppedRecords }));
 
   /**
    * Internal. The gateway ships batches here off its response path.
@@ -33,6 +54,12 @@ export function createBackend({ store, hub, keys, ingestSecret }: BackendConfig)
 
     store.insert(parsed.data.records);
     for (const record of parsed.data.records) hub.broadcast(record);
+
+    // Monotonic on the gateway's side; max() rather than assignment so a batch
+    // arriving out of order cannot walk the number backwards.
+    if (typeof parsed.data.droppedTotal === 'number') {
+      droppedRecords = Math.max(droppedRecords, parsed.data.droppedTotal);
+    }
 
     return c.json({ accepted: parsed.data.records.length });
   });
@@ -66,6 +93,7 @@ export function createBackend({ store, hub, keys, ingestSecret }: BackendConfig)
       terminalStates: list(q.states),
       models: list(q.models),
       q: q.q || undefined,
+      windowMs: window(q.windowMs),
     };
     const limit = Math.min(Number(q.limit) || 50, 200);
     return c.json(store.query(keyOf(c).id, filters, q.cursor ?? null, limit));
@@ -81,11 +109,12 @@ export function createBackend({ store, hub, keys, ingestSecret }: BackendConfig)
    * "p95 is 2.2s" is a number; "p95 is 2.2s, down 340ms" is information.
    */
   app.get('/api/stats', (c) => {
-    const windowMs = Number(c.req.query('windowMs')) || 60 * 60 * 1000;
+    const windowMs = window(c.req.query('windowMs')) ?? 60 * 60 * 1000;
     const now = Date.now();
     return c.json({
       current: store.stats(keyOf(c).id, now - windowMs),
       previous: store.stats(keyOf(c).id, now - windowMs * 2, now - windowMs),
+      droppedRecords,
     });
   });
 

@@ -30,29 +30,111 @@ npm install
 npm run dev
 ```
 
-That starts all four services. Open **http://localhost:5173** and sign in with
-`gw_live_demo_key_1`.
-
-Then send traffic through the gateway:
+That starts all four services — mock upstream, gateway, log backend, dashboard.
 
 ```bash
-curl -N http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer gw_live_demo_key_1" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+npm test         # 64 tests, ~9s, no network, no API key
+npm run typecheck
 ```
 
-Tokens arrive one at a time, and the row appears in the dashboard as it happens.
-`-N` matters: without it curl buffers and you will blame the wrong component.
+Then walk the flow below.
 
 Any OpenAI SDK works unchanged — point `baseURL` at `http://localhost:4000/v1`
 and use a gateway key. To reach the real API, copy `.env.example` to `.env` and
 set `UPSTREAM_BASE_URL=https://api.openai.com` with your `OPENAI_API_KEY`.
 
+## Login and request inspection, end to end
+
+Eight steps, about three minutes, no API key required — the mock upstream
+answers everything.
+
+**1. Start it.**
+
 ```bash
-npm test         # 43 tests, ~6s, no network, no API key
-npm run typecheck
+npm install
+npm run dev
 ```
+
+**2. Sign in.** Open **http://localhost:5173** and enter `gw_live_demo_key_1`.
+
+There is no username and no password: the gateway key *is* the login. Whoever
+holds a key owns the traffic made with it, which is exactly the boundary the
+backend enforces. (Try a wrong key first — the error distinguishes "that key is
+invalid" from "the backend is unreachable", because those need different
+reactions.)
+
+The **Key** tab shows who you are signed in as, that the secret is stored as a
+SHA-256 hash, and the snippet for pointing a client at the gateway.
+
+**3. Send a request.** In a second terminal:
+
+```bash
+npm run ask -- "what is a FIFO buffer?"
+```
+
+`examples/ask.mjs` is a real client: the official `openai` SDK with nothing
+changed but `baseURL`. Tokens stream into your terminal as they arrive. When it
+finishes it fetches the gateway's own log row and compares:
+
+```
+what the caller saw                what the gateway recorded
+  characters received   1857         characters logged     1857
+  chunks with content    378         chunks                 380
+  time to first token   1468ms       time to first token   1435ms
+✓ the text the caller received is byte-identical to the text logged
+```
+
+That is the answer to "how do I know the thing I am inspecting is the thing the
+caller received?" — it is asserted, and the script exits non-zero if it fails.
+
+**4. Watch it arrive.** The row appears in the dashboard *without a refresh*,
+pushed over a WebSocket. The dot beside the search box is the connection state.
+
+**5. Open it.** Click the row — or press `j` / `k` to move through the list.
+Four tabs:
+
+- **request** — the prompt, rendered as a conversation rather than raw JSON
+- **response** — the reassembled assistant message
+- **headers** — request and response, with `authorization` shown as `[redacted]`
+- **timing** — waiting vs. generating, TTFT, chunk count, tokens in and out
+
+The header carries both URLs and the request id, which is the same value the
+gateway returned in `x-gateway-request-id`. **copy as cURL** yields a command
+you can paste and re-run.
+
+**6. Filter.** Chips for method, status class, outcome and model; free text
+matches the URL; `15m / 1h / 24h / 7d` sets the window. Filters live in the query
+string, so any view is a shareable link — and they are applied server-side, so a
+filtered view stays live.
+
+**7. Prove the tenancy boundary.** Send traffic as a different key:
+
+```bash
+GATEWAY_API_KEY=gw_live_demo_key_2 npm run ask -- "a question from another app"
+```
+
+Sign out, sign in as `gw_live_demo_key_2`: you see that request and none of the
+first key's. Sign back in as key 1 and it is the reverse. Two applications, one
+gateway, one upstream key funding both, neither able to read the other's
+prompts. Fetching another key's record by id returns `404`, not `403` — you
+cannot even learn it exists.
+
+**8. Prove logging cannot take the proxy down.** With the stack running, kill
+just the log backend:
+
+```bash
+lsof -ti:4020 | xargs kill -9
+npm run ask -- "does the gateway still work?"
+```
+
+The answer still streams. The dashboard says so in words rather than going
+quietly still, and reconnects on its own when the backend returns. If the
+gateway's queue overflows while it is away, the dashboard reports how many
+records were lost — silent log loss is the failure mode of every buffered
+logging system, and this one is not silent.
+
+To do all of the above against the real OpenAI API instead of the mock, set
+`UPSTREAM_BASE_URL=https://api.openai.com` and `OPENAI_API_KEY` in `.env`.
 
 ## Requirements
 
@@ -64,9 +146,15 @@ npm run typecheck
 | Streaming via Server-Sent Events | `gateway/src/sse.ts`, `app.ts` | `streaming-timing.test.ts`, `sse.test.ts` |
 | Authenticate to the gateway via API key | `shared/src/keys.ts` | `auth.test.ts` |
 | Logs and metadata stored per API key | `backend/src/db.ts` | `backend.test.ts` (tenancy) |
-| Real-time stream of requests | `backend/src/ws.ts`, `dashboard/src/useLogFeed.ts` | screenshot below |
-| Click through to full detail | `dashboard/src/components/DetailDrawer.tsx` | screenshot below |
-| Filter by method, status, URL substring | `dashboard/src/components/FilterBar.tsx` | `backend.test.ts` (filters) |
+| Real-time stream of requests | `backend/src/ws.ts`, `dashboard/src/lib/useLiveLogs.ts` | screenshot below |
+| Click through to full detail | `dashboard/src/routes/RequestDetail.tsx` | screenshot below |
+| Filter by method, status, URL substring | `dashboard/src/routes/Requests.tsx` | `backend.test.ts` (filters) |
+
+Two URLs are recorded, not one. A proxy sits between two requests: `url` is what
+the caller asked the gateway for — the intercepted request, and what the URL
+filter searches and "copy as cURL" reproduces — and `upstreamUrl` is where the
+gateway forwarded it. Every upstream shares the same paths, so without the
+second there is nothing to say whether a call reached OpenAI or the local mock.
 
 ## The problem worth describing
 
@@ -110,7 +198,7 @@ must never throw. A sink that blocks the event loop for 300ms does not move the
 caller's per-chunk timings, and a sink that throws does not break the response —
 both are asserted, because both are the actual claim being made.
 
-## Four things that are easy to get wrong
+## Five things that are easy to get wrong
 
 **A streamed failure is still `200 OK`.** The status is committed before the
 body exists, so a stream that dies at token 400 looks successful. The gateway
@@ -138,6 +226,33 @@ text so forwarding re-encodes to the exact bytes that arrived.
 passed to the upstream `fetch`, and `cancel` cancels the upstream body. The test
 asserts the mock stopped generating, not merely that the gateway returned.
 
+**A `pull` that enqueues nothing ends the stream.** This one cost most of a day
+and is worth stating plainly, because nothing about it is obvious.
+
+A `ReadableStream` schedules `pull` again when a chunk is enqueued, when a new
+read arrives, or when the stream closes — and otherwise not at all. So a `pull`
+that reads bytes, finds it is holding half an SSE frame, and resolves without
+enqueuing *ends the pull chain permanently*. The stream is still `readable`,
+`desiredSize` is still positive, nothing has failed, and no further call will
+ever come. There is no error to catch and nothing in any log.
+
+Every test passed, and the first call to the real API hung after one token. The
+gateway had stopped reading from upstream and sat there until undici's
+300-second body timeout ended it. It was invisible against the mock because the
+mock wrote one whole frame per chunk, so every pull enqueued something. Against
+`api.openai.com`, TCP splits a frame within the first few reads and the gateway
+deadlocks — a failure mode that is *probabilistic in response length*, so a
+short smoke test passes and real traffic hangs.
+
+Two ordinary things produce a read with nothing to forward: a frame split across
+reads, and the usage chunk the gateway requests and strips. So `pull` now loops
+until it has something to hand over. The mock grew an `x-mock-split-at` header so
+it can be as rude as a real socket, and `streaming-frames.test.ts` hangs without
+the fix — verified by putting the bug back.
+
+The general lesson is the one the whole test suite is built on: *a proxy is only
+tested by an upstream that is allowed to be inconvenient.*
+
 ## The dashboard
 
 ![Request detail](docs/detail.png)
@@ -156,6 +271,14 @@ Three details are deliberate rather than incidental:
   uses. A filtered view stays live without shipping rows the browser would
   discard — and without rows appearing that would vanish on refresh. That shared
   predicate has its own test.
+- **The time window travels as a duration, not a timestamp.** An anchored
+  `since` would freeze "the last hour" at the moment the chip was clicked and go
+  stale while you watched it; sending `windowMs` lets the server resolve it
+  against its own clock on every query.
+- **Two silences are named rather than left to interpretation.** A backend that
+  went away and a queue that overflowed both look like "no traffic" in a live
+  table. Each gets a banner saying which it is, because an inspector that
+  quietly under-reports is worse than one that is obviously down.
 
 Filters live in the query string, so a filtered view is a shareable link.
 
@@ -207,9 +330,14 @@ last. A flat line is the proof, and nothing else produces one.
 | `logging` — client disconnect | the upstream stopped generating, not just the gateway |
 | `logging` — usage | exact tokens captured, caller's stream unchanged |
 | `logging` — redaction | neither the caller's key nor the upstream key appears in a stored record |
+| `streaming-frames` — split frames | a frame split across reads still reaches the caller; hangs without the fix |
+| `logging` — URLs | the caller's URL and the upstream URL are both recorded, query strings intact |
+| `sink-http` — overflow | the oldest records are dropped, and the count reaches the dashboard |
+| `sink-http` — dead backend | `write` never throws, whatever the backend is doing |
 | `backend` — tenancy | key A cannot list or fetch key B's logs; unknown key is 401 |
 | `backend` — idempotent ingest | a retried batch does not duplicate rows |
 | `backend` — filters, pagination | each filter and the keyset cursor behave |
+| `backend` — time window | relative, clamped, and ignored when nonsense |
 | `backend` — live predicate | the WS filter agrees with the SQL filter |
 
 Back-pressure is deliberately not asserted end-to-end; the comment in
@@ -228,8 +356,34 @@ packages/
     src/sink.ts      LogSink interface + memory and HTTP implementations
     src/app.ts       the proxy itself
   backend/       ingest, SQLite store, query API, WebSocket fan-out
-  dashboard/     React + Vite: login, live table, filters, detail drawer
+  dashboard/     React + Vite
+    src/routes/      Login, Requests (live table + filters), RequestDetail, Keys
+    src/lib/         API client, the live feed hook, formatting
+examples/
+  ask.mjs        a real client: streams an answer, then checks it against the log
 ```
+
+## Scaling
+
+[`docs/scaling.md`](docs/scaling.md) works the problem at a million requests per
+second: where the bottlenecks are, in the order they break, with the arithmetic.
+
+The summary is that the proxy tier scales by buying machines — it is stateless
+and already is — and the logging plane does not scale in its current shape at
+all. One stored record per request is 4 GB/s and 345 TB/day at that rate, which
+no choice of database fixes. The answer is to split metrics (aggregated, every
+request, forever) from traces (sampled, full fidelity, short retention), which is
+worth roughly 100× before any infrastructure changes.
+
+Two findings from that exercise are already fixed here, because they were cheap
+and real:
+
+- **The first ceiling was 200 records/sec** — one batch of 50 every 250ms, one
+  request in flight. The sink now runs several batches concurrently, since the
+  limit is round-trip latency rather than bytes. A test asserts the concurrency
+  rather than trusting the constant.
+- **Batch inserts now run in one transaction.** Each row was previously its own
+  implicit transaction and its own WAL commit.
 
 ## Further work
 

@@ -24,7 +24,22 @@ export const LogRecord = z.object({
 
   startedAt: z.number(),
   method: z.string(),
+  /**
+   * The URL the caller requested, as it arrived at the proxy. This is the
+   * request being intercepted, so it is what `url` means everywhere: it is
+   * what the URL filter searches and what "copy as cURL" reproduces.
+   */
   url: z.string(),
+  /**
+   * Where the gateway forwarded it. Distinct from `url` and worth keeping
+   * separately — every upstream shares the same paths, so this is the only
+   * field that distinguishes a call that reached api.openai.com from one that
+   * hit the local mock.
+   *
+   * Nullable because rows written before this field existed have no value for
+   * it; the column was added by migration rather than by dropping the table.
+   */
+  upstreamUrl: z.string().nullable(),
   path: z.string(),
   model: z.string().nullable(),
   isStream: z.boolean(),
@@ -52,8 +67,35 @@ export const LogRecord = z.object({
 });
 export type LogRecord = z.infer<typeof LogRecord>;
 
-export const IngestBatch = z.object({ records: z.array(LogRecord) });
+export const IngestBatch = z.object({
+  records: z.array(LogRecord),
+  /**
+   * Running total of records the gateway's queue has dropped under
+   * back-pressure. Monotonic, so it rides along with every batch and needs no
+   * separate channel: if the backend is the thing that was down, the count
+   * arrives on the first batch that gets through.
+   *
+   * Silent log loss is the failure mode of every buffered logging system. This
+   * is what makes it not silent.
+   */
+  droppedTotal: z.number().optional(),
+});
 export type IngestBatch = z.infer<typeof IngestBatch>;
+
+/**
+ * The time windows the dashboard offers, shared so the UI and the API cannot
+ * drift. Order is the order the chips render in.
+ */
+export const TIME_RANGES = {
+  '15m': 15 * 60 * 1000,
+  '1h': 60 * 60 * 1000,
+  '24h': 24 * 60 * 60 * 1000,
+  '7d': 7 * 24 * 60 * 60 * 1000,
+} as const;
+export type TimeRange = keyof typeof TIME_RANGES;
+export const DEFAULT_RANGE: TimeRange = '1h';
+export const isTimeRange = (v: string | null | undefined): v is TimeRange =>
+  v !== null && v !== undefined && v in TIME_RANGES;
 
 /**
  * Headers replaced with "[redacted]" before a record is ever stored.
@@ -124,6 +166,12 @@ export interface Filters {
   models?: string[];
   /** substring match on the URL */
   q?: string;
+  /**
+   * Look-back window in ms, relative rather than absolute on purpose: an
+   * anchored `since` timestamp would freeze "the last hour" at the moment the
+   * chip was clicked, and the view would go stale while you watched it.
+   */
+  windowMs?: number;
 }
 
 export interface Page {
@@ -138,4 +186,11 @@ export interface Stats {
   p95: number;
   promptTokens: number;
   completionTokens: number;
+}
+
+export interface StatsResponse {
+  current: Stats;
+  previous: Stats;
+  /** Records the gateway had to drop; anything above zero means logs are lost. */
+  droppedRecords: number;
 }

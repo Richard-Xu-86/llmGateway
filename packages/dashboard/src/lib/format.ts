@@ -23,7 +23,7 @@ export const STATE_LABEL: Record<string, string> = {
 /** One colour vocabulary for outcome, used by the dot, the bar and the text. */
 export function outcomeColor(row: Pick<LogSummary, 'terminalState' | 'status'>): string {
   if (row.terminalState === 'completed') return 'var(--ok)';
-  if (row.terminalState === 'client_aborted') return '#85858f';
+  if (row.terminalState === 'client_aborted') return 'var(--neutral)';
   if (row.terminalState === 'truncated') return 'var(--warn)';
   return 'var(--bad)';
 }

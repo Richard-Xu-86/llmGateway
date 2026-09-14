@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Outlet, useMatch, useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import type { Filters, Stats } from '@gw/shared';
+import { DEFAULT_RANGE, TIME_RANGES, isTimeRange, type Filters, type Stats } from '@gw/shared';
 import { useAuth } from '../auth';
 import { fetchModels, fetchStats } from '../lib/api';
-import { useLiveLogs } from '../lib/useLiveLogs';
+import { useLiveLogs, type Connection } from '../lib/useLiveLogs';
 import { STATE_LABEL, ago, compact, outcomeColor } from '../lib/format';
 
+const RANGES = Object.keys(TIME_RANGES) as Array<keyof typeof TIME_RANGES>;
 const METHODS = ['POST', 'GET'];
 const STATUS = ['2xx', '4xx', '5xx'];
 const STATES = [
@@ -19,12 +20,16 @@ const STATES = [
 /** Filters live in the query string, so any view is a shareable link. */
 function readFilters(p: URLSearchParams): Filters {
   const list = (k: string) => p.get(k)?.split(',').filter(Boolean);
+  const range = p.get('range');
   return {
     methods: list('methods'),
     statusClasses: list('status'),
     terminalStates: list('states'),
     models: list('models'),
     q: p.get('q') ?? undefined,
+    // The window travels as a duration, not a timestamp, so "last 24h" keeps
+    // meaning the last 24 hours for as long as the tab is open.
+    windowMs: TIME_RANGES[isTimeRange(range) ? range : DEFAULT_RANGE],
   };
 }
 
@@ -39,15 +44,19 @@ export function Requests() {
   const [paused, setPaused] = useState(false);
 
   const filters = useMemo(() => readFilters(params), [params.toString()]);
-  const { rows, loading, connection, loadMore, hasMore, pending } = useLiveLogs(
+  const rangeParam = params.get('range');
+  const range = isTimeRange(rangeParam) ? rangeParam : DEFAULT_RANGE;
+  const { rows, loading, connection, loadMore, hasMore, pending, loadFailed } = useLiveLogs(
     key,
     filters,
     paused,
   );
 
   const stats = useQuery({
-    queryKey: ['stats', key, rows.length === 0],
-    queryFn: () => fetchStats(key),
+    // The window is part of the key, so changing the range refetches rather
+    // than showing an hour's numbers above a week's rows.
+    queryKey: ['stats', key, range, rows.length === 0],
+    queryFn: () => fetchStats(key, TIME_RANGES[range]),
     refetchInterval: 15_000,
   });
   const models = useQuery({ queryKey: ['models', key], queryFn: () => fetchModels(key) });
@@ -79,9 +88,22 @@ export function Requests() {
   const isOn = (param: string, value: string) =>
     (params.get(param)?.split(',') ?? []).includes(value);
 
+  function setRange(next: string) {
+    const p = new URLSearchParams(params);
+    if (next === DEFAULT_RANGE) p.delete('range');
+    else p.set('range', next);
+    setParams(p, { replace: true });
+  }
+
   return (
     <>
-      <StatStrip pair={stats.data} />
+      <StatStrip pair={stats.data} range={range} ranges={RANGES} onRange={setRange} />
+
+      <Banner
+        connection={connection}
+        loadFailed={loadFailed}
+        dropped={stats.data?.droppedRecords ?? 0}
+      />
 
       <div className="panes">
         <section className="pane">
@@ -104,7 +126,18 @@ export function Requests() {
             >
               {paused ? `Resume${pending ? ` ${pending}` : ''}` : 'Pause'}
             </button>
-            <span className={`livedot ${connection === 'live' ? '' : 'off'}`} />
+            <span
+              className={`livedot ${
+                connection === 'live' ? '' : connection === 'reconnecting' ? 'retry' : 'off'
+              }`}
+              title={
+                connection === 'live'
+                  ? 'Receiving live requests'
+                  : connection === 'reconnecting'
+                    ? 'Backend unreachable — reconnecting'
+                    : 'Not connected'
+              }
+            />
           </div>
 
           <div className="filters">
@@ -138,9 +171,19 @@ export function Requests() {
               </>
             ) : rows.length === 0 ? (
               <div className="empty">
-                No requests match.
-                <br />
-                Send one through the gateway and it appears here without a refresh.
+                {loadFailed ? (
+                  <>
+                    Could not reach the log backend.
+                    <br />
+                    This is not &ldquo;no traffic&rdquo; — nothing was asked.
+                  </>
+                ) : (
+                  <>
+                    No requests in the last {range}.
+                    <br />
+                    Send one through the gateway and it appears here without a refresh.
+                  </>
+                )}
               </div>
             ) : (
               <>
@@ -185,7 +228,66 @@ export function Requests() {
   );
 }
 
-function StatStrip({ pair }: { pair?: { current: Stats; previous: Stats } }) {
+/**
+ * Says out loud when the table has stopped telling the truth.
+ *
+ * Two different silences look identical in a live view, and both used to be
+ * invisible here: a backend that went away (rows stop arriving, which reads as
+ * "no traffic"), and a gateway queue that overflowed (rows arrive, but some
+ * never existed). An inspector that quietly under-reports is worse than one
+ * that is obviously down, so both get said in words.
+ */
+function Banner({
+  connection,
+  loadFailed,
+  dropped,
+}: {
+  connection: Connection;
+  loadFailed: boolean;
+  dropped: number;
+}) {
+  const offline = connection === 'closed' || connection === 'reconnecting' || loadFailed;
+
+  if (!offline && dropped === 0) return null;
+
+  return (
+    <div className="banners">
+      {offline && (
+        <div className="banner warn">
+          <span className="bdot" />
+          <span>
+            <b>Not receiving new requests.</b> The log backend is unreachable — rows shown are
+            whatever arrived before it went away.
+          </span>
+          <span className="bnote">
+            {connection === 'reconnecting' ? 'reconnecting…' : 'retrying'}
+          </span>
+        </div>
+      )}
+      {dropped > 0 && (
+        <div className="banner warn">
+          <span className="bdot" />
+          <span>
+            <b>{compact(dropped)} log records dropped.</b> The gateway's queue overflowed, so some
+            requests were served but never recorded. Proxying was unaffected.
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatStrip({
+  pair,
+  range,
+  ranges,
+  onRange,
+}: {
+  pair?: { current: Stats; previous: Stats };
+  range: string;
+  ranges: readonly string[];
+  onRange: (r: string) => void;
+}) {
   const cur = pair?.current;
   const prev = pair?.previous;
 
@@ -199,7 +301,24 @@ function StatStrip({ pair }: { pair?: { current: Stats; previous: Stats } }) {
 
   return (
     <div className="stats">
-      <Kpi label="requests / hr" value={cur ? compact(cur.total) : '—'} delta={pctChange(cur?.total, prev?.total)} goodWhenUp />
+      <div className="ranges">
+        {ranges.map((r) => (
+          <button
+            key={r}
+            className={`chip tiny ${r === range ? 'on' : ''}`}
+            onClick={() => onRange(r)}
+            title={`Requests and stats from the last ${r}`}
+          >
+            {r}
+          </button>
+        ))}
+      </div>
+      <Kpi
+        label={`requests / ${range}`}
+        value={cur ? compact(cur.total) : '—'}
+        delta={pctChange(cur?.total, prev?.total)}
+        goodWhenUp
+      />
       <Kpi label="not completed" value={cur ? `${errRate.toFixed(1)}%` : '—'} delta={errRate - prevErrRate} unit="pt" />
       <Kpi label="p50" value={cur ? `${cur.p50}` : '—'} suffix="ms" delta={pctChange(cur?.p50, prev?.p50)} />
       <Kpi label="p95" value={cur ? `${cur.p95}` : '—'} suffix="ms" delta={pctChange(cur?.p95, prev?.p95)} />

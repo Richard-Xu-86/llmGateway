@@ -61,10 +61,12 @@ export interface Me {
 export interface StatsPair {
   current: Stats;
   previous: Stats;
+  droppedRecords: number;
 }
 
 export const verifyKey = (key: string) => get<Me>(key, '/api/me');
-export const fetchStats = (key: string) => get<StatsPair>(key, '/api/stats');
+export const fetchStats = (key: string, windowMs?: number) =>
+  get<StatsPair>(key, windowMs ? `/api/stats?windowMs=${windowMs}` : '/api/stats');
 export const fetchModels = (key: string) => get<{ models: string[] }>(key, '/api/models');
 export const fetchLog = (key: string, id: string) => get<LogRecord>(key, `/api/logs/${id}`);
 
@@ -75,6 +77,7 @@ export function filtersToQuery(filters: Filters, cursor?: string | null, limit =
   if (filters.terminalStates?.length) p.set('states', filters.terminalStates.join(','));
   if (filters.models?.length) p.set('models', filters.models.join(','));
   if (filters.q) p.set('q', filters.q);
+  if (filters.windowMs) p.set('windowMs', String(filters.windowMs));
   if (cursor) p.set('cursor', cursor);
   p.set('limit', String(limit));
   return p.toString();
@@ -83,11 +86,42 @@ export function filtersToQuery(filters: Filters, cursor?: string | null, limit =
 export const fetchLogs = (key: string, filters: Filters, cursor?: string | null) =>
   get<Page>(key, `/api/logs?${filtersToQuery(filters, cursor)}`);
 
-/** Reconstructs the call as the caller made it, key elided. */
+/**
+ * Reconstructs the call as the caller made it, key elided.
+ *
+ * `record.url` and not `record.upstreamUrl`: the point is a command you can
+ * paste and re-run, which means it has to go back through the gateway with a
+ * gateway key. Aimed at the upstream it would be a request to OpenAI carrying
+ * the wrong credential — a command that looks right and always fails.
+ */
+/**
+ * Headers that were worth *recording* but must not be replayed.
+ *
+ * The captured set is deliberately everything-minus-secrets, which is right for
+ * a log and wrong for a command. Three reasons a header gets dropped here:
+ *
+ *  - curl owns it. `content-length` is the dangerous one: it is correct until
+ *    you edit the body, which is the main reason to copy the command at all.
+ *    Edit the prompt and the server reads only the declared bytes, leaving
+ *    truncated JSON or a hung request.
+ *  - it describes a connection that no longer exists (`connection`, `host`).
+ *  - it is the client describing itself. The `x-stainless-*` block is the SDK
+ *    reporting its OS, arch and Node version; you are a terminal now.
+ */
+const CURL_SKIP = new Set([
+  'authorization', // replaced with the env var below
+  'host',
+  'content-length',
+  'connection',
+  'accept-encoding',
+  'accept-language',
+]);
+const CURL_SKIP_PREFIXES = ['sec-', 'x-stainless-'];
+
 export function toCurl(record: LogRecord): string {
   const lines = [`curl -N ${record.url} \\`, `  -H "Authorization: Bearer $GATEWAY_API_KEY" \\`];
   for (const [name, value] of Object.entries(record.requestHeaders)) {
-    if (name === 'authorization' || name === 'host' || name.startsWith('sec-')) continue;
+    if (CURL_SKIP.has(name) || CURL_SKIP_PREFIXES.some((p) => name.startsWith(p))) continue;
     lines.push(`  -H "${name}: ${value}" \\`);
   }
   if (record.requestBody) lines.push(`  -d '${record.requestBody.replace(/'/g, "'\\''")}'`);

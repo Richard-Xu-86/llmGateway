@@ -114,7 +114,10 @@ export function createGateway(config: GatewayConfig) {
       apiKeyName: key.name,
       startedAt,
       method,
-      url: upstreamUrl,
+      // The intercepted request is the one the caller made, so that is `url`.
+      // Where it was forwarded is a separate, equally useful fact.
+      url: c.req.url,
+      upstreamUrl,
       path: requestUrl.pathname,
       model: typeof parsedBody?.model === 'string' ? parsedBody.model : null,
       isStream,
@@ -240,8 +243,32 @@ export function createGateway(config: GatewayConfig) {
     const trace = process.env.GATEWAY_DEBUG_STREAM === '1';
     const short = id.slice(0, 8);
     let readCount = 0;
+    let pullCount = 0;
     let forwarded = 0;
-    if (trace) console.error(`[stream ${short}] open  status=${upstream.status} ct=${contentType}`);
+    let lastActivityAt = Date.now();
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+
+    if (trace) {
+      console.error(`[stream ${short}] open  status=${upstream.status} ct=${contentType}`);
+      // A stalled stream produces no output at all, which makes "stopped" and
+      // "still running but quiet" look identical. The heartbeat separates them:
+      // if these lines keep printing, the process is alive and the stream went
+      // quiet; if they stop too, the process itself is wedged.
+      heartbeat = setInterval(() => {
+        const secs = (ms: number) => (ms / 1000).toFixed(1);
+        console.error(
+          `[stream ${short}] · alive t+${secs(Date.now() - startedAt)}s ` +
+            `pulls=${pullCount} reads=${readCount} fwd=${forwarded} ` +
+            `idle=${secs(Date.now() - lastActivityAt)}s ` +
+            `aborted=${c.req.raw.signal?.aborted === true}`,
+        );
+      }, 2000);
+      heartbeat.unref?.();
+    }
+    const stopHeartbeat = () => {
+      if (heartbeat) clearInterval(heartbeat);
+      heartbeat = undefined;
+    };
 
     /**
      * Pull-driven on purpose.
@@ -257,56 +284,92 @@ export function createGateway(config: GatewayConfig) {
     const out = new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {
-          // Logged BEFORE the await: if `pull enter` appears with no matching
-          // `read`, the read is hanging (upstream or the HTTP client). If it
-          // never appears, the stream stopped asking us for data (our consumer).
-          if (trace) console.error(`[stream ${short}] pull enter (read#${readCount + 1} pending)`);
-          const { done, value } = await reader.read();
-          if (trace) {
-            readCount += 1;
-            console.error(
-              `[stream ${short}] read#${readCount} ${done ? 'DONE' : `${value!.byteLength}B`}`,
-            );
-          }
-          if (done) {
-            for (const event of reframer.end()) {
-              if (capture.observe(event, injectUsage)) controller.enqueue(encoder.encode(event));
+          /**
+           * The loop is load-bearing, and the reason is a sharp edge in the
+           * Streams spec: `pull` is scheduled again only when a chunk is
+           * enqueued, when a fresh read arrives, or when the stream closes.
+           * A `pull` that reads bytes, enqueues nothing and resolves therefore
+           * ends the pull chain, and the stream hangs with no error anywhere.
+           *
+           * Two ordinary things make a read produce no event: a TCP read that
+           * lands in the middle of an SSE event (the reframer holds a partial),
+           * and the usage chunk we asked for on the caller's behalf and strip
+           * again. So: keep reading until we have something to hand over.
+           *
+           * This is invisible against the mock, which emits one whole event per
+           * write. It showed up on the first real API call. See the
+           * split-frame test in test/streaming-frames.test.ts.
+           */
+          for (;;) {
+            // Logged BEFORE the await: `pull enter` with no matching `read`
+            // means the upstream read is hanging; no `pull enter` at all means
+            // the stream stopped asking us for data.
+            if (trace) {
+              pullCount += 1;
+              lastActivityAt = Date.now();
+              console.error(`[stream ${short}] pull enter (read#${readCount + 1} pending)`);
             }
-            controller.close();
-            if (trace) console.error(`[stream ${short}] closed after ${forwarded} events`);
-            finish(); // the caller already has every byte by now
-            return;
-          }
-          // Hot path. Reframe, observe, forward. Nothing else.
-          const events = reframer.push(value);
-          for (const event of events) {
-            if (capture.observe(event, injectUsage)) {
-              controller.enqueue(encoder.encode(event));
-              forwarded += 1;
+            const { done, value } = await reader.read();
+            if (trace) {
+              readCount += 1;
+              lastActivityAt = Date.now();
+              console.error(
+                `[stream ${short}] read#${readCount} ${done ? 'DONE' : `${value!.byteLength}B`}`,
+              );
             }
-          }
-          if (trace) {
-            console.error(
-              `[stream ${short}]   ${events.length} events, ${forwarded} forwarded total, desiredSize=${controller.desiredSize}`,
-            );
+            if (done) {
+              for (const event of reframer.end()) {
+                if (capture.observe(event, injectUsage)) controller.enqueue(encoder.encode(event));
+              }
+              controller.close();
+              if (trace) console.error(`[stream ${short}] closed after ${forwarded} events`);
+              stopHeartbeat();
+              finish(); // the caller already has every byte by now
+              return;
+            }
+            // Hot path. Reframe, observe, forward. Nothing else.
+            const events = reframer.push(value);
+            let enqueued = 0;
+            for (const event of events) {
+              if (capture.observe(event, injectUsage)) {
+                controller.enqueue(encoder.encode(event));
+                forwarded += 1;
+                enqueued += 1;
+              }
+            }
+            if (trace) {
+              console.error(
+                `[stream ${short}]   ${events.length} events, ${enqueued} enqueued, ${forwarded} forwarded total, desiredSize=${controller.desiredSize}`,
+              );
+            }
+            // Handed something over, so the consumer will ask again when ready.
+            // Nothing to hand over means read again rather than resolve, or the
+            // stream stops pulling for good.
+            if (enqueued > 0) return;
           }
         } catch (err) {
+          if (trace) console.error(`[stream ${short}] read threw: ${String(err)}`);
           if (c.req.raw.signal?.aborted) capture.aborted = true;
           else capture.transportError = String(err instanceof Error ? err.message : err);
           controller.error(err);
+          stopHeartbeat();
           finish();
         }
       },
       cancel(reason) {
+        if (trace) console.error(`[stream ${short}] cancel: ${String(reason)}`);
         capture.aborted = true;
         void reader.cancel(reason).catch(() => {});
+        stopHeartbeat();
         finish();
       },
     });
 
     c.req.raw.signal?.addEventListener('abort', () => {
+      if (trace) console.error(`[stream ${short}] caller signal aborted`);
       capture.aborted = true;
       void reader.cancel('client aborted').catch(() => {});
+      stopHeartbeat();
       finish();
     });
 

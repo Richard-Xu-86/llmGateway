@@ -5,7 +5,7 @@ import { fetchLogs } from './api';
 const MAX_ROWS = 500;
 const FLUSH_MS = 200;
 
-export type Connection = 'connecting' | 'live' | 'closed';
+export type Connection = 'connecting' | 'live' | 'closed' | 'reconnecting';
 
 /**
  * The live request feed.
@@ -25,11 +25,15 @@ export function useLiveLogs(key: string, filters: Filters, paused: boolean) {
   const [loading, setLoading] = useState(true);
   const [connection, setConnection] = useState<Connection>('connecting');
   const [pending, setPending] = useState(0);
+  const [loadFailed, setLoadFailed] = useState(false);
 
   const buffer = useRef<LogSummary[]>([]);
   const socket = useRef<WebSocket | null>(null);
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
+  // Read by the socket's onopen, which outlives the render that created it.
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
 
   const filterKey = JSON.stringify(filters);
 
@@ -43,8 +47,15 @@ export function useLiveLogs(key: string, filters: Filters, paused: boolean) {
         setPending(0);
         setRows(page.rows);
         setCursor(page.nextCursor);
+        setLoadFailed(false);
       })
-      .catch(() => !cancelled && setRows([]))
+      .catch(() => {
+        if (cancelled) return;
+        setRows([]);
+        // Distinguishes "nothing matched" from "nobody answered", which the
+        // empty state alone cannot.
+        setLoadFailed(true);
+      })
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
@@ -52,22 +63,57 @@ export function useLiveLogs(key: string, filters: Filters, paused: boolean) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, filterKey]);
 
+  /**
+   * Reconnects, with backoff.
+   *
+   * Restarting the backend used to leave the dashboard silently dead until a
+   * manual refresh — the table just stopped updating, which looks exactly like
+   * "no traffic". A devtool that lies about whether it is watching is worse
+   * than one that is obviously broken, so the socket comes back on its own and
+   * `connection` is reported honestly while it does.
+   */
   useEffect(() => {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // The key travels as a subprotocol, not a query string — query strings end
-    // up in access logs, proxy logs and browser history.
-    const ws = new WebSocket(`${proto}//${location.host}/api/stream`, ['gw-key', key]);
-    socket.current = ws;
-    ws.onopen = () => setConnection('live');
-    ws.onclose = () => setConnection('closed');
-    ws.onerror = () => setConnection('closed');
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data as string);
-      if (msg.type !== 'log') return;
-      buffer.current.unshift(msg.row as LogSummary);
-      if (pausedRef.current) setPending(buffer.current.length);
+    let closedByUs = false;
+    let attempt = 0;
+    let retryTimer: ReturnType<typeof setTimeout>;
+
+    const connect = () => {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      // The key travels as a subprotocol, not a query string — query strings end
+      // up in access logs, proxy logs and browser history.
+      const ws = new WebSocket(`${proto}//${location.host}/api/stream`, ['gw-key', key]);
+      socket.current = ws;
+
+      ws.onopen = () => {
+        attempt = 0;
+        setConnection('live');
+        // Re-arm the server-side filter: the new socket knows nothing.
+        ws.send(JSON.stringify({ type: 'filters', filters: filtersRef.current }));
+      };
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data as string);
+        if (msg.type !== 'log') return;
+        buffer.current.unshift(msg.row as LogSummary);
+        if (pausedRef.current) setPending(buffer.current.length);
+      };
+      ws.onerror = () => ws.close();
+      ws.onclose = () => {
+        if (closedByUs) return;
+        setConnection('closed');
+        // 500ms, 1s, 2s, 4s… capped at 10s. Fast enough that a dev restarting
+        // the backend barely notices, slow enough not to hammer a dead host.
+        const delay = Math.min(10_000, 500 * 2 ** attempt++);
+        retryTimer = setTimeout(connect, delay);
+        setConnection('reconnecting');
+      };
     };
-    return () => ws.close();
+
+    connect();
+    return () => {
+      closedByUs = true;
+      clearTimeout(retryTimer);
+      socket.current?.close();
+    };
   }, [key]);
 
   useEffect(() => {
@@ -98,5 +144,5 @@ export function useLiveLogs(key: string, filters: Filters, paused: boolean) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, filterKey, cursor]);
 
-  return { rows, loading, connection, loadMore, hasMore: cursor !== null, pending };
+  return { rows, loading, connection, loadMore, hasMore: cursor !== null, pending, loadFailed };
 }
