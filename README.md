@@ -4,7 +4,7 @@ An authenticating proxy in front of the OpenAI API that records every request
 and response, streams the answer back untouched, and a dashboard for inspecting
 the traffic live.
 
-![The live request table](docs/dashboard.png)
+![The live request table, with one request open on its timing breakdown](docs/dashboard.png)
 
 ```
 ┌────────────┐  Authorization: Bearer gw_…  ┌──────────────┐  real OpenAI key  ┌────────────┐
@@ -294,7 +294,7 @@ tested by an upstream that is allowed to be inconvenient.*
 
 ## The dashboard
 
-![Request detail](docs/detail.png)
+![Request detail: both URLs, the request id, and headers with authorization redacted](docs/detail.png)
 
 The gateway key *is* the login: whoever holds it owns the traffic made with it,
 which is exactly the boundary the backend enforces.
