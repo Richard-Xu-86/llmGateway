@@ -1,4 +1,5 @@
-import type { Filters, LogRecord, LogSummary, Page, Stats } from '@gw/shared';
+import type { Bucket, Filters, LogRecord, LogSummary, Page, Series, Stats } from '@gw/shared';
+import { SERIES_BUCKETS } from '@gw/shared';
 import { DatabaseSync, type SqliteDatabase } from './sqlite.ts';
 
 /**
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
 );
 CREATE INDEX IF NOT EXISTS ix_logs_key_time ON request_logs(api_key_id, started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS ix_logs_key_status ON request_logs(api_key_id, status);
+
 `;
 
 export class LogStore {
@@ -162,7 +164,17 @@ export class LogStore {
       where.push('url LIKE ?');
       params.push(`%${filters.q}%`);
     }
-    if (filters.windowMs) {
+    // An explicit span beats the relative window — see the note on Filters.
+    if (filters.from !== undefined || filters.to !== undefined) {
+      if (filters.from !== undefined) {
+        where.push('started_at >= ?');
+        params.push(filters.from);
+      }
+      if (filters.to !== undefined) {
+        where.push('started_at <= ?');
+        params.push(filters.to);
+      }
+    } else if (filters.windowMs) {
       // Resolved here, not on the client, so the window stays relative to now
       // on every query. Rides the (api_key_id, started_at DESC) index.
       where.push('started_at >= ?');
@@ -247,6 +259,75 @@ export class LogStore {
     ).map((r) => r.model as string);
   }
 
+  /**
+   * The same numbers the KPI strip shows, but bucketed over time.
+   *
+   * Bucketing happens in SQL — `started_at / bucketMs` floors each row into a
+   * slot and GROUP BY does the rest — so this is one indexed scan rather than
+   * pulling every row into JS to sort them into piles.
+   *
+   * Empty buckets are filled in afterwards. Leaving them out would make a chart
+   * draw a straight line across an outage, which is the exact moment you most
+   * need to see a gap.
+   */
+  series(apiKeyId: string, from: number, to: number): Series {
+    const span = Math.max(1, to - from);
+    // Round to a whole number of ms per bucket; the last bucket may be partial.
+    const bucketMs = Math.max(1000, Math.ceil(span / SERIES_BUCKETS));
+
+    const rows = this.#db
+      .prepare(
+        `SELECT CAST(started_at / ? AS INTEGER) AS slot,
+                COUNT(*) AS requests,
+                SUM(CASE WHEN terminal_state != 'completed' THEN 1 ELSE 0 END) AS errors,
+                COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+         FROM request_logs
+         WHERE api_key_id = ? AND started_at >= ? AND started_at <= ?
+         GROUP BY slot ORDER BY slot`,
+      )
+      .all(bucketMs, apiKeyId, from, to) as any[];
+
+    // p50 per bucket needs the durations themselves, not an aggregate — SQLite
+    // has no percentile function. Capped, because a chart is not worth an
+    // unbounded read.
+    const durations = new Map<number, number[]>();
+    for (const r of this.#db
+      .prepare(
+        `SELECT CAST(started_at / ? AS INTEGER) AS slot, duration_ms
+         FROM request_logs
+         WHERE api_key_id = ? AND started_at >= ? AND started_at <= ?
+         ORDER BY slot LIMIT 20000`,
+      )
+      .all(bucketMs, apiKeyId, from, to) as any[]) {
+      const slot = Number(r.slot);
+      const list = durations.get(slot) ?? [];
+      list.push(Number(r.duration_ms));
+      durations.set(slot, list);
+    }
+
+    const bySlot = new Map<number, any>(rows.map((r) => [Number(r.slot), r]));
+    const firstSlot = Math.floor(from / bucketMs);
+    const lastSlot = Math.floor(to / bucketMs);
+
+    const buckets: Bucket[] = [];
+    for (let slot = firstSlot; slot <= lastSlot; slot++) {
+      const r = bySlot.get(slot);
+      const d = durations.get(slot);
+      if (d) d.sort((a, b) => a - b);
+      buckets.push({
+        t: slot * bucketMs,
+        requests: r ? Number(r.requests) : 0,
+        errors: r ? Number(r.errors ?? 0) : 0,
+        p50: d && d.length > 0 ? d[Math.floor(d.length / 2)]! : null,
+        promptTokens: r ? Number(r.prompt_tokens ?? 0) : 0,
+        completionTokens: r ? Number(r.completion_tokens ?? 0) : 0,
+      });
+    }
+
+    return { buckets, bucketMs, from, to };
+  }
+
   close(): void {
     this.#db.close();
   }
@@ -318,10 +399,18 @@ export function matchesFilters(row: LogSummary, filters: Filters, url = ''): boo
     if (!filters.statusClasses.includes(cls)) return false;
   }
   if (filters.q && !url.toLowerCase().includes(filters.q.toLowerCase())) return false;
-  // A live row is by definition recent, so this rarely rejects anything — but
+  // A live row is by definition recent, so these rarely reject anything — but
   // the two predicates have to stay identical or a filtered view shows rows on
   // arrival that disappear on refresh.
-  if (filters.windowMs && row.startedAt < Date.now() - filters.windowMs) return false;
+  //
+  // The `to` bound is the one that earns its keep: viewing a span that ended in
+  // the past, live rows must NOT appear, and without this they would.
+  if (filters.from !== undefined || filters.to !== undefined) {
+    if (filters.from !== undefined && row.startedAt < filters.from) return false;
+    if (filters.to !== undefined && row.startedAt > filters.to) return false;
+  } else if (filters.windowMs && row.startedAt < Date.now() - filters.windowMs) {
+    return false;
+  }
   return true;
 }
 

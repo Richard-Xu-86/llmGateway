@@ -64,6 +64,16 @@
 
   --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
   color-scheme: dark;
+
+  /* Chart series. Two hues, in fixed order, never cycled.
+     Not the brand accent verbatim: these are stepped into the dark-mode
+     lightness band and checked for colour-vision separation against this
+     surface (ΔE 26.9 protan / 31.4 normal), which #ff7a18 on its own is not.
+     Status colours stay reserved — errors are drawn in --bad because they are
+     a state, not a third series. */
+  --chart-1: #e2711c;
+  --chart-2: #3f90e8;
+  --chart-grid: #2a2320;
 }
 
 * { box-sizing: border-box; }
@@ -145,11 +155,11 @@ a { color: inherit; text-decoration: none; }
 
 /* ── stat strip ────────────────────────────────────────── */
 
-.stats { display: flex; gap: 30px; padding: 18px 4px 16px; flex: none; flex-wrap: wrap; align-items: flex-start; }
+.stats { display: flex; gap: 30px; padding: 12px 4px 16px; flex: none; flex-wrap: wrap; align-items: flex-start; }
 
-/* The range picker reads as part of the stat strip because it governs it:
-   changing the window changes both the numbers above and the rows below. */
-.ranges { display: flex; gap: 4px; padding-top: 2px; margin-right: 4px; }
+/* The range picker sits directly above the strip because it governs it:
+   changing the window changes both the numbers below and the rows under them. */
+.ranges { display: flex; gap: 4px; }
 
 /* Trouble the table cannot show by itself — a dead backend looks like quiet
    traffic, and dropped records look like nothing at all. */
@@ -306,3 +316,104 @@ code { font-family: var(--mono); background: var(--card2); padding: 1px 6px; bor
 .empty { padding: 56px 20px; text-align: center; color: var(--muted); font-size: 12.5px; line-height: 1.6; }
 .skel { height: 12px; border-radius: 6px; background: var(--card2); margin: 10px 13px; }
 .skel.w1 { width: 60%; } .skel.w2 { width: 80%; } .skel.w3 { width: 45%; }
+
+
+/* ── analytics ─────────────────────────────────────────── */
+
+.analytics { position: relative; display: flex; flex-direction: column; gap: 2px; }
+.analytics.empty { padding: 40px 20px; text-align: center; color: var(--muted); font-size: 12.5px; }
+.analytics.empty p { margin: 0; }
+
+.chart { padding: 12px 16px 6px; border-top: 1px solid var(--line); }
+.chart:first-child { border-top: none; }
+.chart header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; flex-wrap: wrap; }
+.chart h3 {
+  margin: 0; font-size: 10.5px; font-weight: 600; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--ink2);
+}
+.chart-sum { font-family: var(--mono); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.chart-legend { display: flex; gap: 12px; margin: 0 0 0 auto; padding: 0; list-style: none; font-size: 10.5px; color: var(--muted); }
+.chart-legend li { display: flex; align-items: center; }
+.chart svg { display: block; width: 100%; height: 104px; overflow: visible; }
+.chart-axis {
+  display: flex; justify-content: space-between;
+  font-family: var(--mono); font-size: 10px; color: var(--dim); padding-top: 2px;
+}
+
+/* Marks: thin lines, recessive baseline, no grid clutter at this size. */
+.baseline { stroke: var(--chart-grid); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.crosshair { stroke: var(--line2); stroke-width: 1; vector-effect: non-scaling-stroke; stroke-dasharray: 2 3; }
+
+.fill-req { fill: var(--chart-1); opacity: .18; }
+.line-req { fill: none; stroke: var(--chart-1); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.fill-err { fill: var(--bad); opacity: .22; }
+.line-err { fill: none; stroke: var(--bad); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.line-lat { fill: none; stroke: var(--chart-1); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; }
+
+.fill-out { fill: var(--chart-2); opacity: .30; }
+.fill-in  { fill: var(--chart-1); opacity: .30; }
+/* 2px of surface between the stacked bands, so they read as two. */
+.sep-in { fill: none; stroke: var(--card); stroke-width: 4; vector-effect: non-scaling-stroke; }
+.line-in { fill: none; stroke: var(--chart-1); stroke-width: 2; vector-effect: non-scaling-stroke; }
+
+.sw-req, .sw-in, .sw-lat { background: var(--chart-1); }
+.sw-out { background: var(--chart-2); }
+.sw-err { background: var(--bad); }
+
+.chart-tip {
+  position: absolute; top: 6px; z-index: 5; pointer-events: none;
+  background: var(--card3); border: 1px solid var(--line2); border-radius: 10px;
+  padding: 9px 11px; min-width: 160px;
+  box-shadow: 0 12px 30px -12px var(--shadow);
+}
+.tip-t { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-bottom: 6px; white-space: nowrap; }
+.tip-span { color: var(--dim); }
+.chart-tip dl {
+  margin: 0; display: grid; grid-template-columns: 1fr auto; gap: 3px 14px;
+  font-size: 11.5px; align-items: center;
+}
+.chart-tip dt { color: var(--muted); display: flex; align-items: center; }
+.chart-tip dd {
+  margin: 0; font-family: var(--mono); color: var(--ink); text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── range controls (shared by Requests and Analytics) ── */
+
+.rangebar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 16px 4px 0; }
+/* On its own page the control sits in the header, which supplies the space. */
+.pagehead .rangebar { padding: 0; }
+
+.range-custom { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.range-custom input {
+  background: var(--card2); border: 1px solid var(--line2); border-radius: 8px;
+  color: var(--ink); font-family: var(--mono); font-size: 11px; padding: 5px 7px;
+  color-scheme: dark;
+}
+.range-custom input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.range-custom span { color: var(--dim); font-size: 11px; }
+.range-clear { color: var(--muted); font-size: 11px; text-decoration: underline; }
+.range-clear:hover { color: var(--ink); }
+
+/* ── analytics page ────────────────────────────────────── */
+
+.analyticspage { padding: 18px 4px 28px; display: flex; flex-direction: column; gap: 16px; }
+.pagehead { display: flex; align-items: flex-start; gap: 18px; flex-wrap: wrap; justify-content: space-between; }
+.pagehead h2 { margin: 0 0 3px; font-size: 17px; letter-spacing: -0.02em; }
+.pagehead p { margin: 0; }
+
+.tiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+.tile { background: var(--card); padding: 14px 16px; display: flex; flex-direction: column; gap: 2px; }
+.tile-v { font-size: 21px; font-weight: 600; letter-spacing: -0.03em; color: var(--ink); font-variant-numeric: tabular-nums; }
+.tile-k { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 7px; }
+.tile-d { font-family: var(--mono); font-size: 10px; padding: 1px 5px; border-radius: 999px; }
+.tile-d.up { color: var(--ok); background: var(--ok-bg); }
+.tile-d.down { color: var(--bad); background: var(--bad-bg); }
+.tile-h { font-size: 10.5px; color: var(--dim); }
+.notice { margin: 0; }
+.notice a { color: var(--accent); }
+
+@media (max-width: 900px) {
+  .tiles { grid-template-columns: repeat(2, 1fr); }
+  .pagehead { flex-direction: column; }
+}

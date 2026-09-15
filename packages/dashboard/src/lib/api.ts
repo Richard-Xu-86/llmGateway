@@ -1,4 +1,4 @@
-import type { Filters, LogRecord, Page, Stats } from '@gw/shared';
+import type { Filters, LogRecord, Page, Series, Stats } from '@gw/shared';
 
 /**
  * The gateway key is the dashboard's login.
@@ -65,8 +65,20 @@ export interface StatsPair {
 }
 
 export const verifyKey = (key: string) => get<Me>(key, '/api/me');
-export const fetchStats = (key: string, windowMs?: number) =>
-  get<StatsPair>(key, windowMs ? `/api/stats?windowMs=${windowMs}` : '/api/stats');
+/** The stats strip and the charts read the same span as the table below them. */
+const spanQuery = (windowMs?: number, from?: number, to?: number): string => {
+  const p = new URLSearchParams();
+  if (from !== undefined) p.set('from', String(from));
+  if (to !== undefined) p.set('to', String(to));
+  if (from === undefined && to === undefined && windowMs) p.set('windowMs', String(windowMs));
+  return p.toString();
+};
+
+export const fetchStats = (key: string, windowMs?: number, from?: number, to?: number) =>
+  get<StatsPair>(key, `/api/stats?${spanQuery(windowMs, from, to)}`);
+
+export const fetchSeries = (key: string, windowMs?: number, from?: number, to?: number) =>
+  get<Series>(key, `/api/series?${spanQuery(windowMs, from, to)}`);
 export const fetchModels = (key: string) => get<{ models: string[] }>(key, '/api/models');
 export const fetchLog = (key: string, id: string) => get<LogRecord>(key, `/api/logs/${id}`);
 
@@ -78,6 +90,10 @@ export function filtersToQuery(filters: Filters, cursor?: string | null, limit =
   if (filters.models?.length) p.set('models', filters.models.join(','));
   if (filters.q) p.set('q', filters.q);
   if (filters.windowMs) p.set('windowMs', String(filters.windowMs));
+  // An explicit span overrides the window server-side; both are sent so the
+  // server decides, rather than the client guessing at the precedence.
+  if (filters.from !== undefined) p.set('from', String(filters.from));
+  if (filters.to !== undefined) p.set('to', String(filters.to));
   if (cursor) p.set('cursor', cursor);
   p.set('limit', String(limit));
   return p.toString();

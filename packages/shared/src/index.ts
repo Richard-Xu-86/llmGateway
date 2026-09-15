@@ -107,6 +107,8 @@ export const ClientMessage = z.object({
       models: z.array(z.string()).max(50).optional(),
       q: z.string().max(500).optional(),
       windowMs: z.number().positive().finite().optional(),
+      from: z.number().int().nonnegative().finite().optional(),
+      to: z.number().int().nonnegative().finite().optional(),
     })
     .optional(),
 });
@@ -202,6 +204,18 @@ export interface Filters {
    * chip was clicked, and the view would go stale while you watched it.
    */
   windowMs?: number;
+  /**
+   * An explicit span, for the case the relative window cannot express: "what
+   * happened during the incident on Tuesday between 14:00 and 15:30".
+   *
+   * `from`/`to` and `windowMs` answer different questions — "this fixed period"
+   * versus "the recent past" — so when both arrive the explicit span wins and
+   * `windowMs` is ignored. Silently intersecting them would produce an empty
+   * result whenever the span fell outside the window, with nothing on screen
+   * to explain why.
+   */
+  from?: number;
+  to?: number;
 }
 
 export interface Page {
@@ -224,3 +238,34 @@ export interface StatsResponse {
   /** Records the gateway had to drop; anything above zero means logs are lost. */
   droppedRecords: number;
 }
+
+/* ---------------------------------------------------------------------------
+ * Analytics.
+ *
+ * The KPI strip answers "how are we doing right now". It cannot answer "when
+ * did this start", which is the question anyone actually has during an
+ * incident — so the same numbers are also served bucketed over time.
+ * ------------------------------------------------------------------------ */
+
+export interface Bucket {
+  /** Start of the bucket, ms. */
+  t: number;
+  requests: number;
+  /** Anything that did not reach `completed` — a 200 that died mid-stream counts. */
+  errors: number;
+  /** Median duration in this bucket, ms. Null when the bucket is empty. */
+  p50: number | null;
+  promptTokens: number;
+  completionTokens: number;
+}
+
+export interface Series {
+  buckets: Bucket[];
+  /** Width of each bucket in ms, chosen server-side from the span. */
+  bucketMs: number;
+  from: number;
+  to: number;
+}
+
+/** How many buckets a chart gets, whatever the span. Wider span, wider buckets. */
+export const SERIES_BUCKETS = 48;

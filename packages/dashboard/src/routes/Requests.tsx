@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Outlet, useMatch, useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { DEFAULT_RANGE, TIME_RANGES, isTimeRange, type Filters, type Stats } from '@gw/shared';
+import { DEFAULT_RANGE, TIME_RANGES, type Stats } from '@gw/shared';
 import { useAuth } from '../auth';
 import { fetchModels, fetchStats } from '../lib/api';
+import { RangeControls } from '../components/RangeControls';
+import { hasSpan, readFilters, readRange } from '../lib/filters';
 import { useLiveLogs, type Connection } from '../lib/useLiveLogs';
 import { STATE_LABEL, ago, compact, outcomeColor } from '../lib/format';
 
-const RANGES = Object.keys(TIME_RANGES) as Array<keyof typeof TIME_RANGES>;
 const METHODS = ['POST', 'GET'];
 const STATUS = ['2xx', '4xx', '5xx'];
 const STATES = [
@@ -16,22 +17,6 @@ const STATES = [
   ['client_aborted', 'aborted'],
   ['truncated', 'truncated'],
 ] as const;
-
-/** Filters live in the query string, so any view is a shareable link. */
-function readFilters(p: URLSearchParams): Filters {
-  const list = (k: string) => p.get(k)?.split(',').filter(Boolean);
-  const range = p.get('range');
-  return {
-    methods: list('methods'),
-    statusClasses: list('status'),
-    terminalStates: list('states'),
-    models: list('models'),
-    q: p.get('q') ?? undefined,
-    // The window travels as a duration, not a timestamp, so "last 24h" keeps
-    // meaning the last 24 hours for as long as the tab is open.
-    windowMs: TIME_RANGES[isTimeRange(range) ? range : DEFAULT_RANGE],
-  };
-}
 
 export function Requests() {
   const { apiKey } = useAuth();
@@ -44,19 +29,20 @@ export function Requests() {
   const [paused, setPaused] = useState(false);
 
   const filters = useMemo(() => readFilters(params), [params.toString()]);
-  const rangeParam = params.get('range');
-  const range = isTimeRange(rangeParam) ? rangeParam : DEFAULT_RANGE;
+  const range = readRange(params);
   const { rows, loading, connection, loadMore, hasMore, pending, loadFailed } = useLiveLogs(
     key,
     filters,
     paused,
   );
 
+  const spanKey = `${filters.from ?? ''}-${filters.to ?? ''}`;
+
   const stats = useQuery({
     // The window is part of the key, so changing the range refetches rather
     // than showing an hour's numbers above a week's rows.
-    queryKey: ['stats', key, range, rows.length === 0],
-    queryFn: () => fetchStats(key, TIME_RANGES[range]),
+    queryKey: ['stats', key, range, spanKey, rows.length === 0],
+    queryFn: () => fetchStats(key, TIME_RANGES[range], filters.from, filters.to),
     refetchInterval: 15_000,
   });
   const models = useQuery({ queryKey: ['models', key], queryFn: () => fetchModels(key) });
@@ -88,16 +74,12 @@ export function Requests() {
   const isOn = (param: string, value: string) =>
     (params.get(param)?.split(',') ?? []).includes(value);
 
-  function setRange(next: string) {
-    const p = new URLSearchParams(params);
-    if (next === DEFAULT_RANGE) p.delete('range');
-    else p.set('range', next);
-    setParams(p, { replace: true });
-  }
+  const customSpan = hasSpan(filters);
 
   return (
     <>
-      <StatStrip pair={stats.data} range={range} ranges={RANGES} onRange={setRange} />
+      <RangeControls />
+      <StatStrip pair={stats.data} range={range} custom={customSpan} />
 
       <Banner
         connection={connection}
@@ -280,13 +262,12 @@ function Banner({
 function StatStrip({
   pair,
   range,
-  ranges,
-  onRange,
+  custom,
 }: {
   pair?: { current: Stats; previous: Stats };
   range: string;
-  ranges: readonly string[];
-  onRange: (r: string) => void;
+  /** A fixed span is active, so the header says "span" rather than "1h". */
+  custom?: boolean;
 }) {
   const cur = pair?.current;
   const prev = pair?.previous;
@@ -301,20 +282,8 @@ function StatStrip({
 
   return (
     <div className="stats">
-      <div className="ranges">
-        {ranges.map((r) => (
-          <button
-            key={r}
-            className={`chip tiny ${r === range ? 'on' : ''}`}
-            onClick={() => onRange(r)}
-            title={`Requests and stats from the last ${r}`}
-          >
-            {r}
-          </button>
-        ))}
-      </div>
       <Kpi
-        label={`requests / ${range}`}
+        label={custom ? 'requests / span' : `requests / ${range}`}
         value={cur ? compact(cur.total) : '—'}
         delta={pctChange(cur?.total, prev?.total)}
         goodWhenUp

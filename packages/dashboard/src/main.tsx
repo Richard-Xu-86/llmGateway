@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, RequireKey } from './auth';
 import { Shell } from './components/Shell';
+import { Analytics } from './routes/Analytics';
 import { Keys } from './routes/Keys';
 import { Login } from './routes/Login';
 import { EmptyDetail, RequestDetail } from './routes/RequestDetail';
@@ -34,6 +35,7 @@ createRoot(document.getElementById('root')!).render(
                 <Route index element={<EmptyDetail />} />
                 <Route path=":id" element={<RequestDetail />} />
               </Route>
+              <Route path="/analytics" element={<Analytics />} />
               <Route path="/keys" element={<Keys />} />
             </Route>
             <Route path="*" element={<Navigate to="/requests" replace />} />
